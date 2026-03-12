@@ -72,11 +72,7 @@ function AbstractMCMC.step(
     ξ = randn(rng, D)
     u = rand(rng)
 
-    accepted = MALA.mala_accept_indicator(
-        model.logdensity, model.grad_logdensity, x, ϵ, ξ, u
-    ) == 1.0
-
-    x_next = MALA.mala_step_taped(
+    x_next, accepted = MALA.mala_step_full(
         model.logdensity, model.grad_logdensity, x, ϵ, ξ, u
     )
 
