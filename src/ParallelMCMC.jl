@@ -1,6 +1,7 @@
 module ParallelMCMC
 
 using AbstractMCMC
+using CUDA
 using MCMCChains
 using LinearAlgebra
 using Random
@@ -10,7 +11,7 @@ include("MALA/MALA.jl")
 include("DEER/DEER.jl")
 include("interface.jl")
 
-export DensityModel, BatchedDensityModel
+export DensityModel
 export MALASampler, MALATransition, MALAState
 export AdaptiveMALASampler, AdaptiveMALATransition, AdaptiveMALAState
 export DEERSampler, DEERTransition, DEERState, MALATapeElement

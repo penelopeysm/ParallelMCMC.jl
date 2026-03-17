@@ -21,36 +21,47 @@ struct DensityModel{F,G} <: AbstractMCMC.AbstractModel
 end
 
 """
-    MALASampler(epsilon)
+    MALASampler(epsilon; cholM=nothing)
 
 Metropolis-Adjusted Langevin Algorithm sampler with step size `epsilon`.
+
+Optionally pass `cholM = cholesky(M)` to use a mass matrix `M` as a
+preconditioner.  The proposal becomes `y = x + ε M ∇logp(x) + √(2ε) L ξ`
+where `L` is the Cholesky factor of `M`.
 """
-struct MALASampler <: AbstractMCMC.AbstractSampler
-    epsilon::Float64
+struct MALASampler{FP<:AbstractFloat, CM} <: AbstractMCMC.AbstractSampler
+    epsilon::FP
+    cholM::CM
 end
 
-struct MALAState{V<:AbstractVector}
-    x::V
-    logp::Float64
+function MALASampler(epsilon::Real; cholM=nothing)
+    epsilon > 0 || throw(ArgumentError("epsilon must be > 0, got $epsilon"))
+    eps_f = float(epsilon)
+    return MALASampler{typeof(eps_f), typeof(cholM)}(eps_f, cholM)
 end
 
-struct MALATransition{V<:AbstractVector}
+struct MALAState{V<:AbstractVector, L<:Real}
     x::V
-    logp::Float64
+    logp::L
+end
+
+struct MALATransition{V<:AbstractVector, L<:Real}
+    x::V
+    logp::L
     accepted::Bool
 end
 
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::MALASampler;
+    sampler::MALASampler{FP};
     initial_params=nothing,
     kwargs...,
-)
+) where {FP}
     x = if initial_params !== nothing
         copy(initial_params)
     else
-        randn(rng, model.dim)
+        randn(rng, FP, model.dim)
     end
     logp_val = model.logdensity(x)
     t = MALATransition(x, logp_val, true)
@@ -69,11 +80,12 @@ function AbstractMCMC.step(
     ϵ = sampler.epsilon
     D = model.dim
 
-    ξ = randn(rng, D)
+    ξ = randn(rng, eltype(x), D)
     u = rand(rng)
 
     x_next, accepted = MALA.mala_step_full(
-        model.logdensity, model.grad_logdensity, x, ϵ, ξ, u
+        model.logdensity, model.grad_logdensity, x, ϵ, ξ, u;
+        cholM=sampler.cholM,
     )
 
     logp_val = accepted ? model.logdensity(x_next) : state.logp
@@ -102,7 +114,7 @@ function AbstractMCMC.bundle_samples(
 
     internal_names = [:logp, :accepted]
 
-    vals = Matrix{Float64}(undef, N, D)
+    vals      = Matrix{Float64}(undef, N, D)
     internals = Matrix{Float64}(undef, N, 2)
 
     for i in 1:N
@@ -126,17 +138,17 @@ One element of the MALA noise tape: a noise vector `ξ ~ N(0,I)` and a uniform
 scalar `u ~ Uniform(0,1)`.  Stored with a concrete vector type `V` for type
 stability inside `DEER.TapedRecursion`.
 """
-struct MALATapeElement{V<:AbstractVector}
+struct MALATapeElement{FP<:AbstractFloat, V<:AbstractVector{FP}}
     ξ::V
-    u::Float64
+    u::FP
 end
 
 """
-    DEERSampler(epsilon; T, maxiter, tol_abs, tol_rel, jacobian, damping, probes)
+    DEERSampler(epsilon; T, maxiter, tol_abs, tol_rel, jacobian, damping, probes, cholM, backend)
 
 DEER-accelerated MALA sampler.
 
-DEER solves for a trajectory of `T` steps in parallel (O(log T) iterations),
+DEER solves for a trajectory of `T` steps in parallel (O(log T) sweep levels),
 then the AbstractMCMC interface returns samples from that trajectory
 sequentially.  When the trajectory is exhausted a new tape is drawn and DEER
 re-solves starting from the last state.
@@ -149,24 +161,33 @@ re-solves starting from the last state.
 - `jacobian` — Jacobian mode: `:diag`, `:stoch_diag`, or `:full` (default `:diag`).
 - `damping` — DEER damping in (0,1] (default 0.5; helps convergence).
 - `probes` — Hutchinson probes for `:stoch_diag` mode (default 1).
+- `cholM` — optional Cholesky factor of a mass matrix `M` (default `nothing` = identity).
+- `backend` — AD backend for Jacobian computation (default `AutoMooncake()`).
+  For GPU execution pass a GPU-compatible backend, e.g. `AutoEnzyme()`.
+
+# GPU use
+The parallel-prefix scan (`solve_affine_scan_diag`) runs as pure array broadcasts
+and is array-type-agnostic.  To run DEER on GPU:
+1. Implement `logdensity` and `grad_logdensity` using GPU-compatible operations.
+2. Pass `backend = AutoEnzyme()` (or another GPU-compatible `ADTypes` backend).
+3. Pass a GPU vector as `initial_params` to `sample`.
 
 # Parallel chains
 Both `MALASampler` and `DEERSampler` are compatible with
 `AbstractMCMC.sample(model, sampler, MCMCThreads(), N, nchains)`.  Each chain
-has its own immutable state and RNG so there is no shared mutable data.
-Note that each `DEERSampler` chain internally uses `Base.Threads.@threads`
-for the parallel scan, so running many chains via `MCMCThreads()` on a machine
-with few threads may over-subscribe the thread pool.
+has its own immutable state so there is no shared mutable data.
 """
-struct DEERSampler <: AbstractMCMC.AbstractSampler
-    epsilon::Float64
+struct DEERSampler{FP<:AbstractFloat, CM, AD} <: AbstractMCMC.AbstractSampler
+    epsilon::FP
     T::Int
     maxiter::Int
-    tol_abs::Float64
-    tol_rel::Float64
+    tol_abs::FP
+    tol_rel::FP
     jacobian::Symbol
-    damping::Float64
+    damping::FP
     probes::Int
+    cholM::CM
+    backend::AD
 end
 
 function DEERSampler(
@@ -178,11 +199,16 @@ function DEERSampler(
     jacobian::Symbol=:diag,
     damping::Real=0.5,
     probes::Int=1,
+    cholM=nothing,
+    backend=DEER.DEFAULT_BACKEND,
 )
-    return DEERSampler(
-        Float64(epsilon), T, maxiter,
-        Float64(tol_abs), Float64(tol_rel),
-        jacobian, Float64(damping), probes,
+    epsilon > 0 || throw(ArgumentError("epsilon must be > 0, got $epsilon"))
+    eps_f = float(epsilon)
+    FP    = typeof(eps_f)
+    return DEERSampler{FP, typeof(cholM), typeof(backend)}(
+        eps_f, T, maxiter,
+        FP(tol_abs), FP(tol_rel),
+        jacobian, FP(damping), probes, cholM, backend,
     )
 end
 
@@ -195,35 +221,36 @@ State for a `DEERSampler` chain.
 - `tape` — noise tape used for that solve.
 - `t` — index within `trajectory` of the last returned sample (1-indexed).
 """
-struct DEERState{V<:AbstractVector, M<:AbstractMatrix}
+struct DEERState{V<:AbstractVector, L<:Real, M<:AbstractMatrix}
     x::V
-    logp::Float64
+    logp::L
     trajectory::M
-    tape::Vector{MALATapeElement{V}}
+    tape::Vector{<:MALATapeElement}
     t::Int
 end
 
 """
 One DEER sample: parameter vector `x` and its log-density `logp`.
 """
-struct DEERTransition{V<:AbstractVector}
+struct DEERTransition{V<:AbstractVector, L<:Real}
     x::V
-    logp::Float64
+    logp::L
 end
 
 function _build_mala_deer_rec(
-    model::DensityModel, ε::Float64, tape::Vector{<:MALATapeElement}
+    model::DensityModel, ε::Real, tape::Vector{<:MALATapeElement};
+    cholM=nothing, backend=DEER.DEFAULT_BACKEND,
 )
     logp     = model.logdensity
     gradlogp = model.grad_logdensity
 
-    step_fwd = (x, te) -> MALA.mala_step_taped(logp, gradlogp, x, ε, te.ξ, te.u)
-    step_lin = (x, te, a) -> MALA.mala_step_surrogate(logp, gradlogp, x, ε, te.ξ, a)
-    consts   = (x, te) -> (MALA.mala_accept_indicator(logp, gradlogp, x, ε, te.ξ, te.u),)
+    step_fwd = (x, te) -> MALA.mala_step_taped(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
+    step_lin = (x, te, a) -> MALA.mala_step_surrogate(logp, gradlogp, x, ε, te.ξ, a; cholM=cholM)
+    consts   = (x, te) -> (MALA.mala_accept_indicator(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM),)
 
     return DEER.TapedRecursion(
         step_fwd, step_lin, tape;
-        consts=consts, const_example=(0.0,),
+        consts=consts, const_example=(0.0,), backend=backend,
     )
 end
 
@@ -235,8 +262,14 @@ function _deer_solve_new_tape(
 )
     D    = model.dim
     T    = sampler.T
-    tape = [MALATapeElement(randn(rng, D), rand(rng)) for _ in 1:T]
-    rec  = _build_mala_deer_rec(model, sampler.epsilon, tape)
+    FP   = typeof(sampler.epsilon)
+    # Generate noise on the same device as x0: generate on CPU then copy via copyto!.
+    # copyto!(CuVector, Vector) performs a host-to-device transfer in CUDA.jl.
+    tape = map(1:T) do _
+        ξ = copyto!(similar(x0, D), randn(rng, FP, D))
+        MALATapeElement(ξ, FP(rand(rng)))
+    end
+    rec  = _build_mala_deer_rec(model, sampler.epsilon, tape; cholM=sampler.cholM, backend=sampler.backend)
     S    = DEER.solve(
         rec, x0;
         tol_abs  = sampler.tol_abs,
@@ -253,22 +286,21 @@ end
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::DEERSampler;
+    sampler::DEERSampler{FP};
     initial_params=nothing,
     kwargs...,
-)
+) where {FP}
     x0 = if initial_params !== nothing
         copy(initial_params)
     else
-        randn(rng, model.dim)
+        randn(rng, FP, model.dim)
     end
 
-    S, tape = _deer_solve_new_tape(rng, model, sampler, x0)
-
-    x1    = S[:, 1]
-    logp1 = Float64(model.logdensity(x1))
-    trans = DEERTransition(x1, logp1)
-    state = DEERState(x1, logp1, S, tape, 1)
+    S, tape  = _deer_solve_new_tape(rng, model, sampler, x0)
+    x1       = S[:, 1]
+    logp1    = model.logdensity(x1)
+    trans    = DEERTransition(x1, logp1)
+    state    = DEERState(x1, logp1, S, tape, 1)
     return trans, state
 end
 
@@ -285,8 +317,8 @@ function AbstractMCMC.step(
     if t_next <= T
         # Consume the next cached sample from the trajectory.
         x_new    = state.trajectory[:, t_next]
-        logp_new = Float64(model.logdensity(x_new))
-        trans    = DEERTransition(x_new, logp_new)
+        logp_new = model.logdensity(x_new)
+        trans     = DEERTransition(x_new, logp_new)
         new_state = DEERState(x_new, logp_new, state.trajectory, state.tape, t_next)
         return trans, new_state
     else
@@ -294,8 +326,8 @@ function AbstractMCMC.step(
         x0          = state.trajectory[:, T]
         S_new, tape = _deer_solve_new_tape(rng, model, sampler, x0)
         x_new    = S_new[:, 1]
-        logp_new = Float64(model.logdensity(x_new))
-        trans    = DEERTransition(x_new, logp_new)
+        logp_new = model.logdensity(x_new)
+        trans     = DEERTransition(x_new, logp_new)
         new_state = DEERState(x_new, logp_new, S_new, tape, 1)
         return trans, new_state
     end
@@ -325,7 +357,7 @@ function AbstractMCMC.bundle_samples(
     internals = Matrix{Float64}(undef, N, 1)
 
     for i in 1:N
-        vals[i, :] .= samples[i].x
+        vals[i, :]   .= samples[i].x
         internals[i, 1] = samples[i].logp
     end
 
@@ -334,42 +366,6 @@ function AbstractMCMC.bundle_samples(
         vcat(names, internal_names),
         Dict(:parameters => names, :internals => internal_names),
     )
-end
-
-"""
-    BatchedDensityModel(logdensity_batch, grad_logdensity_batch, dim)
-
-Wraps batched log-density and gradient functions for use with
-`MALA.mala_step_batched`.
-
-- `logdensity_batch(X::AbstractMatrix) -> AbstractVector` —
-  `X` is D×N; returns a length-N vector of log-densities.
-- `grad_logdensity_batch(X::AbstractMatrix) -> AbstractMatrix` —
-  `X` is D×N; returns a D×N gradient matrix (column `n` = gradient for chain `n`).
-- `dim::Int` — dimensionality D of the parameter space.
-
-# GPU use
-Pass `CuMatrix` inputs and implement the two functions to return `CuArray`s.
-Requires `cholM=nothing` in `mala_step_batched` for fully on-device execution.
-
-# Example
-```julia
-logp_b(X)      = vec(sum(x -> -0.5x^2, X; dims=1))   # standard normal, N chains
-gradlogp_b(X)  = -X
-bmodel = BatchedDensityModel(logp_b, gradlogp_b, 3)
-
-X  = randn(3, 100)   # 100 chains of dimension 3
-Xi = randn(3, 100)
-u  = rand(100)
-X_next, accepted = MALA.mala_step_batched(bmodel.logdensity_batch,
-                                          bmodel.grad_logdensity_batch,
-                                          X, 0.1, Xi, u)
-```
-"""
-struct BatchedDensityModel{F,G} <: AbstractMCMC.AbstractModel
-    logdensity_batch::F
-    grad_logdensity_batch::G
-    dim::Int
 end
 
 """
@@ -414,13 +410,13 @@ Load `LogDensityProblems` (and optionally `LogDensityProblemsAD`) then use the
 `DensityModel(ld)` constructor to wrap any `LogDensityProblems`-compatible model
 (including Turing/DynamicPPL models) directly.
 """
-struct AdaptiveMALASampler{CM} <: AbstractMCMC.AbstractSampler
-    epsilon_init::Float64
+struct AdaptiveMALASampler{FP<:AbstractFloat, CM} <: AbstractMCMC.AbstractSampler
+    epsilon_init::FP
     n_warmup::Int
-    target_accept::Float64
-    gamma::Float64
-    t0::Float64
-    kappa::Float64
+    target_accept::FP
+    gamma::FP
+    t0::FP
+    kappa::FP
     cholM::CM
 end
 
@@ -433,48 +429,58 @@ function AdaptiveMALASampler(
     kappa::Real=0.75,
     cholM=nothing,
 )
-    return AdaptiveMALASampler(
-        Float64(epsilon_init), n_warmup,
-        Float64(target_accept), Float64(gamma), Float64(t0), Float64(kappa),
+    epsilon_init > 0   || throw(ArgumentError("epsilon_init must be > 0, got $epsilon_init"))
+    0 < target_accept < 1 || throw(ArgumentError("target_accept must be in (0,1), got $target_accept"))
+    gamma > 0          || throw(ArgumentError("gamma must be > 0, got $gamma"))
+    t0 > 0             || throw(ArgumentError("t0 must be > 0, got $t0"))
+    0.5 < kappa <= 1.0 || throw(ArgumentError("kappa must be in (0.5, 1], got $kappa"))
+
+    eps_f = float(epsilon_init)
+    FP    = typeof(eps_f)
+    return AdaptiveMALASampler{FP, typeof(cholM)}(
+        eps_f, n_warmup,
+        FP(target_accept), FP(gamma), FP(t0), FP(kappa),
         cholM,
     )
 end
 
-struct AdaptiveMALAState{V<:AbstractVector}
+struct AdaptiveMALAState{V<:AbstractVector, FP<:AbstractFloat}
     x::V
-    logp::Float64
-    epsilon::Float64       # instantaneous step size ε_m
-    epsilon_bar::Float64   # smoothed step size ε̄_m  (frozen after warmup)
-    H_bar::Float64         # dual-average statistic H̄_m
-    step::Int              # warmup step counter (0 = initialisation)
+    logp::FP
+    epsilon::FP        # instantaneous step size ε_m
+    epsilon_bar::FP    # smoothed step size ε̄_m  (frozen after warmup)
+    H_bar::FP          # dual-average statistic H̄_m
+    step::Int          # warmup step counter (0 = initialisation)
 end
 
-struct AdaptiveMALATransition{V<:AbstractVector}
+struct AdaptiveMALATransition{V<:AbstractVector, FP<:AbstractFloat}
     x::V
-    logp::Float64
+    logp::FP
     accepted::Bool
-    step_size::Float64   # ε used for this step
+    step_size::FP   # ε used for this step
     is_warmup::Bool
 end
 
 function _dual_average_update(
-    epsilon_init::Float64,
-    epsilon_bar::Float64,
-    H_bar::Float64,
+    epsilon_init::FP,
+    epsilon_bar::FP,
+    H_bar::FP,
     m::Int,
-    logα::Float64,
-    sampler::AdaptiveMALASampler,
-)
-    α   = min(1.0, exp(logα))
+    logα::FP,
+    sampler::AdaptiveMALASampler{FP},
+) where {FP<:AbstractFloat}
+    α   = min(one(FP), exp(logα))
     δ   = sampler.target_accept
     γ   = sampler.gamma
     t0  = sampler.t0
     κ   = sampler.kappa
-    μ   = log(10.0 * epsilon_init)   # fixed shrinkage target
+    μ   = log(10 * epsilon_init)   # fixed shrinkage target
 
-    H_bar_new     = (1.0 - 1.0 / (m + t0)) * H_bar + (1.0 / (m + t0)) * (δ - α)
-    log_ε         = μ - sqrt(Float64(m)) / γ * H_bar_new
-    log_ε_bar_new = Float64(m)^(-κ) * log_ε + (1.0 - Float64(m)^(-κ)) * log(epsilon_bar)
+    inv_mt0   = one(FP) / (FP(m) + t0)
+    H_bar_new = (one(FP) - inv_mt0) * H_bar + inv_mt0 * (δ - α)
+    log_ε     = μ - sqrt(FP(m)) / γ * H_bar_new
+    mk        = FP(m)^(-κ)
+    log_ε_bar_new = mk * log_ε + (one(FP) - mk) * log(epsilon_bar)
 
     return exp(log_ε), exp(log_ε_bar_new), H_bar_new
 end
@@ -482,33 +488,33 @@ end
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::AdaptiveMALASampler;
+    sampler::AdaptiveMALASampler{FP};
     initial_params=nothing,
     kwargs...,
-)
+) where {FP}
     x = if initial_params !== nothing
         copy(initial_params)
     else
-        randn(rng, model.dim)
+        randn(rng, FP, model.dim)
     end
-    logp_val = Float64(model.logdensity(x))
+    logp_val = FP(model.logdensity(x))
     trans    = AdaptiveMALATransition(x, logp_val, true, sampler.epsilon_init, true)
-    state    = AdaptiveMALAState(x, logp_val, sampler.epsilon_init, sampler.epsilon_init, 0.0, 0)
+    state    = AdaptiveMALAState(x, logp_val, sampler.epsilon_init, sampler.epsilon_init, zero(FP), 0)
     return trans, state
 end
 
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::AdaptiveMALASampler,
+    sampler::AdaptiveMALASampler{FP},
     state::AdaptiveMALAState;
     kwargs...,
-)
-    D          = model.dim
-    in_warmup  = state.step < sampler.n_warmup
-    ε          = in_warmup ? state.epsilon : state.epsilon_bar
+) where {FP}
+    D         = model.dim
+    in_warmup = state.step < sampler.n_warmup
+    ε         = in_warmup ? state.epsilon : state.epsilon_bar
 
-    ξ = randn(rng, D)
+    ξ = randn(rng, eltype(state.x), D)
     u = rand(rng)
 
     x_next, accepted, logα = MALA.mala_step_with_logα(
@@ -516,12 +522,15 @@ function AbstractMCMC.step(
         cholM=sampler.cholM,
     )
 
-    logp_next = accepted ? Float64(model.logdensity(x_next)) : state.logp
+    logp_next = accepted ? FP(model.logdensity(x_next)) : state.logp
 
     # Dual-average adaptation (only during warmup)
-    m_new            = state.step + 1
+    m_new = state.step + 1
     ε_new, ε_bar_new, H_bar_new = if in_warmup
-        _dual_average_update(sampler.epsilon_init, state.epsilon_bar, state.H_bar, m_new, logα, sampler)
+        _dual_average_update(
+            sampler.epsilon_init, state.epsilon_bar, state.H_bar,
+            m_new, FP(logα), sampler,
+        )
     else
         state.epsilon, state.epsilon_bar, state.H_bar
     end
@@ -558,9 +567,9 @@ function AbstractMCMC.bundle_samples(
         s = samples[i]
         vals[i, :]  .= s.x
         internals[i, 1] = s.logp
-        internals[i, 2] = s.accepted   ? 1.0 : 0.0
+        internals[i, 2] = s.accepted  ? 1.0 : 0.0
         internals[i, 3] = s.step_size
-        internals[i, 4] = s.is_warmup  ? 1.0 : 0.0
+        internals[i, 4] = s.is_warmup ? 1.0 : 0.0
     end
 
     return MCMCChains.Chains(
