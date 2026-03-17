@@ -280,11 +280,7 @@ function deer_update(
         S_new = solve_affine_scan_diag(A, B, s0)
 
         if damping != 1.0
-            @threads for t in 1:T
-                for i in 1:D
-                    S_new[i, t] = (1 - damping) * S[i, t] + damping * S_new[i, t]
-                end
-            end
+            @. S_new = (1 - damping) * S + damping * S_new
         end
 
         return S_new
