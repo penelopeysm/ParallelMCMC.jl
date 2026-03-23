@@ -15,7 +15,7 @@ function _quad_Minv(r, cholM::Cholesky)
     return dot(w, w)
 end
 
-_logdet_M(::Nothing) = 0.0
+_logdet_M(::Nothing) = false  # Bool promotes to any numeric type without widening
 _logdet_M(cholM::Cholesky) = logdet(cholM)
 
 """
@@ -30,10 +30,11 @@ function logq_mala(
     y::AbstractVector, x::AbstractVector, gradlogp_x::AbstractVector, ϵ::Real;
     cholM=nothing,
 )
+    T = typeof(ϵ)
     μ = x .+ ϵ .* _apply_M(gradlogp_x, cholM)
     d = length(x)
     r = y .- μ
-    return -0.5 * _quad_Minv(r, cholM) / (2ϵ) - (d / 2) * log(4π * ϵ) - 0.5 * _logdet_M(cholM)
+    return -T(0.5) * _quad_Minv(r, cholM) / (2ϵ) - (T(d) / 2) * log(T(4π) * ϵ) - T(0.5) * _logdet_M(cholM)
 end
 
 """
@@ -164,7 +165,7 @@ log acceptance ratio `logα = log p(y) + log q(x|y) - log p(x) - log q(y|x)`.
 The returned `logα` is the un-clamped value; the actual acceptance probability is
 `min(1, exp(logα))`.  This is needed by adaptive step-size schemes (dual averaging).
 
-Returns `(x_next, accepted::Bool, logα::Float64)`.
+Returns `(x_next, accepted::Bool, logα)`.
 """
 function mala_step_with_logα(
     logp, gradlogp, x::AbstractVector, ϵ::Real, ξ::AbstractVector, u::Real;
@@ -186,7 +187,7 @@ function mala_step_with_logα(
 
     accepted = log(u) < logα
     x_next = accepted ? y : x
-    return x_next, accepted, Float64(logα)
+    return x_next, accepted, logα
 end
 
 """
@@ -238,12 +239,13 @@ function logq_mala_batched(
     ε::Real;
     cholM=nothing,
 )
+    T = typeof(ε)
     D = size(X, 1)
     μ = X .+ ε .* _apply_M_batched(gradlogp_X, cholM)
     R = Y .- μ
     q = _quad_Minv_batched(R, cholM)
     ldet = _logdet_M(cholM)
-    return @. -0.5 * q / (2ε) - (D / 2) * log(4π * ε) - 0.5 * ldet
+    return @. -T(0.5) * q / (2ε) - (T(D) / 2) * log(T(4π) * ε) - T(0.5) * ldet
 end
 
 """
