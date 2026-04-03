@@ -6,19 +6,30 @@ Defines model/sampler/state/transition types and implements
 =#
 
 """
-    DensityModel(logdensity, grad_logdensity, dim)
+    DensityModel(logdensity, grad_logdensity, dim; param_names=nothing)
+    DensityModel(logdensity, grad_logdensity, dim, param_names)
 
 Wraps a log-density function and its gradient for use with ParallelMCMC samplers.
 
 - `logdensity(x::AbstractVector) -> Real`
 - `grad_logdensity(x::AbstractVector) -> AbstractVector`
 - `dim::Int` — dimensionality of the parameter space
+- `param_names` — optional `Vector{Symbol}` of parameter names used in `MCMCChains` output.
+  If `nothing` (the default), names fall back to `x[1], x[2], ...`.
+
+Parameter names can also be overridden at sampling time via the `param_names` keyword
+argument of `sample(...)`.
 """
 struct DensityModel{F,G} <: AbstractMCMC.AbstractModel
     logdensity::F
     grad_logdensity::G
     dim::Int
+    param_names::Union{Nothing, Vector{Symbol}}
 end
+
+# Backward-compatible 3-argument constructor
+DensityModel(logdensity, grad_logdensity, dim) =
+    DensityModel(logdensity, grad_logdensity, dim, nothing)
 
 """
     MALASampler(epsilon; cholM=nothing)
@@ -108,6 +119,8 @@ function AbstractMCMC.bundle_samples(
 
     names = if param_names !== nothing
         param_names
+    elseif model.param_names !== nothing
+        model.param_names
     else
         [Symbol("x[$i]") for i in 1:D]
     end
@@ -347,6 +360,8 @@ function AbstractMCMC.bundle_samples(
 
     names = if param_names !== nothing
         param_names
+    elseif model.param_names !== nothing
+        model.param_names
     else
         [Symbol("x[$i]") for i in 1:D]
     end
@@ -547,13 +562,18 @@ function AbstractMCMC.bundle_samples(
     state::AdaptiveMALAState,
     ::Type{MCMCChains.Chains};
     param_names=nothing,
+    discard_warmup=false,
     kwargs...,
 )
-    N = length(samples)
+    # Optionally remove warmup samples before building the chain.
+    filtered = discard_warmup ? filter(s -> !s.is_warmup, samples) : samples
+    N = length(filtered)
     D = model.dim
 
     names = if param_names !== nothing
         param_names
+    elseif model.param_names !== nothing
+        model.param_names
     else
         [Symbol("x[$i]") for i in 1:D]
     end
@@ -564,7 +584,7 @@ function AbstractMCMC.bundle_samples(
     internals = Matrix{Float64}(undef, N, 4)
 
     for i in 1:N
-        s = samples[i]
+        s = filtered[i]
         vals[i, :]  .= s.x
         internals[i, 1] = s.logp
         internals[i, 2] = s.accepted  ? 1.0 : 0.0
@@ -604,7 +624,7 @@ using Turing, LogDensityProblems, LogDensityProblemsAD, Mooncake
 end
 
 ld  = DynamicPPL.LogDensityFunction(mymodel(obs))
-ldg = LogDensityProblemsAD.ADgradient(Mooncake.Extras.MooncakeAD(), ld)
+ldg = LogDensityProblemsAD.ADgradient(ADTypes.AutoMooncake(; config=nothing), ld)
 model = DensityModel(ldg)
 
 chain = sample(model, AdaptiveMALASampler(0.1; n_warmup=500), 2000;

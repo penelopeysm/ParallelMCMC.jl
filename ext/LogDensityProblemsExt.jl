@@ -4,7 +4,7 @@ using ParallelMCMC
 import LogDensityProblems
 
 """
-    DensityModel(ld)
+    DensityModel(ld; param_names=nothing)
 
 Construct a `DensityModel` from any object implementing the
 [LogDensityProblems](https://github.com/tpapp/LogDensityProblems.jl) interface.
@@ -14,6 +14,11 @@ Construct a `DensityModel` from any object implementing the
   `LogDensityProblems.LogDensityOrder{1}` (i.e. gradient available).
 - `LogDensityProblems.dimension(ld)` → `Int`
 - `LogDensityProblems.logdensity_and_gradient(ld, x)` → `(logp, grad)`
+
+The optional `param_names` keyword accepts a `Vector{Symbol}` of parameter names
+that will be used for the columns of the returned `MCMCChains.Chains` object.
+If omitted, names default to `x[1], x[2], ...` unless you also pass `param_names`
+to `sample(...)`.
 
 # Turing.jl / DynamicPPL example
 ```julia
@@ -26,14 +31,18 @@ end
 
 obs = 1.5
 ld  = DynamicPPL.LogDensityFunction(mymodel(obs))
-ldg = LogDensityProblemsAD.ADgradient(Mooncake.Extras.MooncakeAD(), ld)
+ldg = LogDensityProblemsAD.ADgradient(ADTypes.AutoMooncake(; config=nothing), ld)
 
-model = DensityModel(ldg)
+model = DensityModel(ldg; param_names=[:μ])
 chain = sample(model, AdaptiveMALASampler(0.3; n_warmup=500), 2_000;
-               chain_type=MCMCChains.Chains, progress=true)
+               chain_type=MCMCChains.Chains, discard_warmup=true, progress=true)
 ```
+
+If both DynamicPPL and LogDensityProblemsAD are loaded, the simpler one-step
+constructor `DensityModel(mymodel(obs))` is also available and extracts parameter
+names automatically.
 """
-function ParallelMCMC.DensityModel(ld)
+function ParallelMCMC.DensityModel(ld; param_names=nothing)
     caps = LogDensityProblems.capabilities(ld)
     caps isa LogDensityProblems.LogDensityOrder{0} &&
         error("LogDensityProblems model must support gradients (LogDensityOrder{1} or higher). " *
@@ -48,7 +57,7 @@ function ParallelMCMC.DensityModel(ld)
         return g
     end
 
-    return ParallelMCMC.DensityModel(logp, gradlogp, dim)
+    return ParallelMCMC.DensityModel(logp, gradlogp, dim, param_names)
 end
 
 end # module
