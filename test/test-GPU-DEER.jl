@@ -23,6 +23,29 @@ else
     _logp(x) = -0.5f0 * sum(abs2, x)
     _gradlogp(x) = -x
 
+    #=
+    Collect GPU-compatible backends to test.
+    DifferentiationInterface abstracts over backends; any backend whose
+    pushforward works on CuArrays (i.e. uses broadcast rather than scalar
+    indexing) is valid.  AutoForwardDiff constructs Duals via element-wise
+    broadcast and is unconditionally available.  AutoEnzyme is added when
+    Enzyme is loadable and its CUDA extension is functional.
+    =#
+    _gpu_backends = Pair{String,ADTypes.AbstractADType}[
+        "ForwardDiff" => ADTypes.AutoForwardDiff(),
+    ]
+    if !Sys.iswindows()
+        try
+            import Enzyme
+            push!(_gpu_backends, "Enzyme" => ADTypes.AutoEnzyme())
+        catch
+            @warn "Enzyme not loadable — skipping Enzyme GPU DEER tests"
+        end
+    end
+
+    # Convenience alias used by tests that don't need to sweep over all backends.
+    _gpu_backend = last(first(_gpu_backends))
+
     @testset "solve_affine_scan_diag CPU vs GPU" begin
         rng = MersenneTwister(1)
         D, T = 4, 16
@@ -44,19 +67,21 @@ else
         @test Array(S_gpu) ≈ S_cpu atol=1e-5
     end
 
-    const GPU_BACKEND = ADTypes.AutoForwardDiff()
-
-    @testset "DEER.solve on GPU matches sequential MALA ground truth (diag mode)" begin
+    #=
+    Backend-parametric convergence test: run DEER.solve on GPU with each
+    available backend and verify the solution matches the sequential CPU
+    reference.  This is the primary test that the AD abstraction layer
+    (DifferentiationInterface) is backend-agnostic.
+    =#
+    @testset "DEER.solve GPU backend=$bname (diag)" for (bname, backend) in _gpu_backends
         rng = MersenneTwister(42)
         D, T = 3, 16
         ε = 0.05f0
 
-        # Generate tape on CPU; copy ξ to GPU
         ξs_cpu = [randn(rng, Float32, D) for _ in 1:T]
         us = Float32.(rand(rng, T))
         x0_cpu = randn(rng, Float32, D)
 
-        # Sequential ground truth (CPU)
         xs_seq = MALA.run_mala_sequential_taped(_logp, _gradlogp, x0_cpu, ε, ξs_cpu, us)
 
         tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
@@ -66,12 +91,7 @@ else
             (x, te) -> (MALA.mala_accept_indicator(_logp, _gradlogp, x, ε, te.ξ, te.u),)
 
         rec = DEER.TapedRecursion(
-            step_fwd,
-            step_lin,
-            tape;
-            consts=consts,
-            const_example=(0.0f0,),
-            backend=GPU_BACKEND,
+            step_fwd, step_lin, tape; consts=consts, const_example=(0.0f0,), backend=backend
         )
 
         x0_gpu = CUDA.CuArray(x0_cpu)
@@ -91,11 +111,12 @@ else
         @test size(S_gpu) == (D, T)
         @test all(isfinite, Array(S_gpu))
 
-        S_ref = reduce(hcat, xs_seq[2:end])   # D×T CPU reference
+        S_ref = reduce(hcat, xs_seq[2:end])
         @test Array(S_gpu) ≈ S_ref rtol=1e-4 atol=1e-5
     end
 
-    @testset "DEER.solve on GPU matches sequential MALA ground truth (stoch_diag mode)" begin
+    @testset "DEER.solve GPU backend=$bname (stoch_diag)" for (bname, backend) in
+                                                               _gpu_backends
         rng = MersenneTwister(7)
         D, T = 4, 32
         ε = 0.05f0
@@ -113,12 +134,7 @@ else
             (x, te) -> (MALA.mala_accept_indicator(_logp, _gradlogp, x, ε, te.ξ, te.u),)
 
         rec = DEER.TapedRecursion(
-            step_fwd,
-            step_lin,
-            tape;
-            consts=consts,
-            const_example=(0.0f0,),
-            backend=GPU_BACKEND,
+            step_fwd, step_lin, tape; consts=consts, const_example=(0.0f0,), backend=backend
         )
 
         x0_gpu = CUDA.CuArray(x0_cpu)
@@ -148,7 +164,7 @@ else
         rng = MersenneTwister(7)
         D = 3
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(0.05f0; T=8, maxiter=200, jacobian=:diag, backend=GPU_BACKEND)
+        sampler = DEERSampler(0.05f0; T=8, maxiter=200, jacobian=:diag, backend=_gpu_backend)
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
 
         trans, state = ParallelMCMC.AbstractMCMC.step(
@@ -169,7 +185,7 @@ else
         rng = MersenneTwister(42)
         D = 3
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(0.05f0; T=8, maxiter=200, jacobian=:diag, backend=GPU_BACKEND)
+        sampler = DEERSampler(0.05f0; T=8, maxiter=200, jacobian=:diag, backend=_gpu_backend)
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
 
         trans, state = ParallelMCMC.AbstractMCMC.step(
@@ -190,7 +206,7 @@ else
         rng = MersenneTwister(99)
         D, T = 3, 4
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(0.05f0; T=T, maxiter=200, jacobian=:diag, backend=GPU_BACKEND)
+        sampler = DEERSampler(0.05f0; T=T, maxiter=200, jacobian=:diag, backend=_gpu_backend)
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
 
         _, state = ParallelMCMC.AbstractMCMC.step(
@@ -219,7 +235,7 @@ else
             jacobian=:stoch_diag,
             probes=1,
             damping=0.5,
-            backend=GPU_BACKEND,
+            backend=_gpu_backend,
         )
 
         rng = MersenneTwister(2025)

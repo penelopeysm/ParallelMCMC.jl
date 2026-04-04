@@ -1,6 +1,5 @@
 module DEER
 
-using Base.Threads: @threads, threadid
 using LinearAlgebra
 using DifferentiationInterface
 using ADTypes: ADTypes, AbstractADType
@@ -266,11 +265,11 @@ function deer_update(
         A = similar(S)
         B = similar(S)
 
-        # GPU arrays (CuVector, etc.) require a sequential loop:
-        #   (a) ForwardDiff's prepared pushforward stores a single mutable xdual_tmp
-        #       buffer — concurrent writes from @threads cause a data race on GPU.
-        #   (b) GPU kernels are internally parallel; Julia-thread parallelism adds no
-        #       benefit and breaks device memory safety.
+        # GPU arrays (CuVector, etc.) use a sequential loop:
+        #   (a) AD backends store mutable prep buffers; concurrent Julia tasks on GPU
+        #       arrays would race against device memory.
+        #   (b) GPU kernels are internally parallel; host-side task parallelism adds
+        #       no benefit and can break device memory safety.
         on_gpu = !(s0 isa Array)
 
         if on_gpu
@@ -287,36 +286,36 @@ function deer_update(
                 view(B, :, t) .= ft .- jt .* xbar
             end
         else
-            nt = Base.Threads.maxthreadid()
-            # zbufs for stoch_diag: one per thread to avoid sharing.
-            zbufs = jacobian === :stoch_diag ? [similar(s0, D) for _ in 1:nt] : nothing
-            rngs = if jacobian === :stoch_diag
-                seeds = rand(rng, UInt, nt)
-                [MersenneTwister(seeds[i]) for i in 1:nt]
-            else
-                nothing
-            end
+            # Pre-generate one seed per time step before spawning tasks.
+            # Sharing `rng` across concurrently running tasks would be a data race.
+            # Using @threads + threadid() to index per-thread buffers is an unsafe
+            # pattern in Julia (tasks can migrate across threads); @spawn with
+            # task-local state is the correct approach.
+            task_seeds = jacobian === :stoch_diag ? rand(rng, UInt, T) : nothing
 
-            @threads for t in 1:T
-                tid = threadid()
-                # S[:, t-1] returns a column copy — Vector on CPU.
-                xbar = t == 1 ? s0 : S[:, t - 1]
-                jt = if jacobian === :diag
-                    jac_diag(rec, prep, xbar, t)
-                else
-                    jac_diag_stoch(
-                        rec,
-                        prep,
-                        xbar,
-                        t;
-                        probes=probes,
-                        rng=rngs[tid],
-                        zbuf=zbufs[tid],
-                    )
+            tasks = map(1:T) do t
+                seed_t = jacobian === :stoch_diag ? task_seeds[t] : nothing
+                Threads.@spawn begin
+                    # Task-local state — each spawned task owns its own RNG + buffer.
+                    zbuf_t = jacobian === :stoch_diag ? similar(s0, D) : nothing
+                    rng_t = jacobian === :stoch_diag ? MersenneTwister(seed_t) : nothing
+                    # S[:, t-1] returns a column copy — Vector on CPU.
+                    xbar = t == 1 ? s0 : S[:, t - 1]
+                    jt = if jacobian === :diag
+                        jac_diag(rec, prep, xbar, t)
+                    else
+                        jac_diag_stoch(
+                            rec, prep, xbar, t; probes=probes, rng=rng_t, zbuf=zbuf_t
+                        )
+                    end
+                    ft = rec.step_fwd(xbar, rec.tape[t])
+                    (jt, ft .- jt .* xbar)
                 end
-                ft = rec.step_fwd(xbar, rec.tape[t])
+            end
+            for (t, task) in enumerate(tasks)
+                jt, bt = fetch(task)
                 view(A, :, t) .= jt
-                view(B, :, t) .= ft .- jt .* xbar
+                view(B, :, t) .= bt
             end
         end
 
