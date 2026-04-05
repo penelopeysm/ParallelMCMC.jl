@@ -1,5 +1,5 @@
 """
-Throughput benchmark: GPU DEERSampler vs CPU AdaptiveMALA on Bayesian logistic regression.
+Throughput benchmark: GPU ParallelMALASampler vs CPU AdaptiveMALA on Bayesian logistic regression.
 
 The key comparison is GPU DEER vs CPU MALA: DEER parallelises T MALA steps into
 an O(log T) parallel-prefix scan on the GPU, so each solve produces T new samples
@@ -44,7 +44,7 @@ _logp_cpu, _gradlogp_cpu = BayesLogReg.make_problem(X_f32, y_f32)
 
 model_cpu = DensityModel(_logp_cpu, _gradlogp_cpu, D)
 
-deer_cpu = DEERSampler(
+deer_cpu = ParallelMALASampler(
     0.1f0;
     T=16,
     maxiter=50,
@@ -85,7 +85,7 @@ end
 
 configs = [(1_000, 8, "1k"), (10_000, 4, "10k"), (100_000, 3, "100k")]
 
-results = Dict{Tuple{String,String},BenchmarkTools.Trial}() 
+results = Dict{Tuple{String,String},BenchmarkTools.Trial}()
 
 # CPU MALA baseline
 
@@ -103,7 +103,7 @@ end
 # CPU DEER
 
 println("=" ^ 65)
-println("CPU DEERSampler  (T=16, AutoForwardDiff, Float32)")
+println("CPU ParallelMALASampler  (T=16, AutoForwardDiff, Float32)")
 println("Model: Bayesian logistic regression  D=$D  N_data=$N_data")
 println("=" ^ 65, "\n")
 
@@ -122,7 +122,7 @@ if _cuda_ok
 
     model_gpu = DensityModel(_logp_gpu, _gradlogp_gpu, D)
 
-    deer_gpu = DEERSampler(
+    deer_gpu = ParallelMALASampler(
         0.1f0;
         T=16,
         maxiter=50,
@@ -135,7 +135,7 @@ if _cuda_ok
     x0_gpu = CUDA.CuArray(zeros(Float32, D))
 
     println("=" ^ 65)
-    println("GPU DEERSampler  (T=16, AutoForwardDiff, Float32, CuArrays)")
+    println("GPU ParallelMALASampler  (T=16, AutoForwardDiff, Float32, CuArrays)")
     println("Model: Bayesian logistic regression  D=$D  N_data=$N_data")
     println("=" ^ 65, "\n")
 

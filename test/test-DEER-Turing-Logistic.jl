@@ -23,7 +23,7 @@ The tests are split into two groups:
 
 Turing integration: uses the DynamicPPL convenience constructor.  These are
 CPU-only because DynamicPPL model evaluation does not support GPU arrays.
-DEERSampler works fine with Turing on CPU; for GPU you supply a manual
+ParallelMALASampler works fine with Turing on CPU; for GPU you supply a manual
 logp/gradlogp that is array-type-agnostic (see below).
 
 Statistical/GPU: use a hand-written logp/gradlogp implemented as pure array
@@ -72,7 +72,7 @@ end
 
 # Turing integration tests (CPU)
 
-@testset "DEERSampler Turing logistic: param names extracted correctly" begin
+@testset "ParallelMALASampler Turing logistic: param names extracted correctly" begin
     model = DensityModel(_deer_logistic_regression(_LR_X, _LR_y))
 
     @test model.dim == _LR_D
@@ -81,9 +81,9 @@ end
     @test all(isfinite, model.grad_logdensity(zeros(_LR_D)))
 end
 
-@testset "DEERSampler Turing logistic: chains output well-formed" begin
+@testset "ParallelMALASampler Turing logistic: chains output well-formed" begin
     model = DensityModel(_deer_logistic_regression(_LR_X, _LR_y))
-    sampler = DEERSampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
+    sampler = ParallelMALASampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
 
     chain = sample(
         MersenneTwister(42),
@@ -101,9 +101,9 @@ end
     @test all(isfinite, Array(chain[:, [Symbol("β[1]"), Symbol("β[2]")], :]))
 end
 
-@testset "DEERSampler Turing logistic: posterior sign correct" begin
+@testset "ParallelMALASampler Turing logistic: posterior sign correct" begin
     model = DensityModel(_deer_logistic_regression(_LR_X, _LR_y))
-    sampler = DEERSampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
+    sampler = ParallelMALASampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
 
     chain = sample(
         MersenneTwister(99),
@@ -126,7 +126,7 @@ end
 # Statistical correctness: DEER posterior mean matches AdaptiveMALA reference.
 # Uses the manual DensityModel so the DEER Jacobian can use AutoForwardDiff().
 
-@testset "DEERSampler logistic: posterior mean matches AdaptiveMALA reference" begin
+@testset "ParallelMALASampler logistic: posterior mean matches AdaptiveMALA reference" begin
     X64, y64 = Float64.(_LR_X), Float64.(_LR_y)
     model = DensityModel(β -> _logp_lr(β, X64, y64), β -> _gradlogp_lr(β, X64, y64), _LR_D)
 
@@ -144,7 +144,7 @@ end
     deer_chain = sample(
         MersenneTwister(42),
         model,
-        DEERSampler(
+        ParallelMALASampler(
             0.1;
             T=16,
             maxiter=50,
@@ -180,7 +180,7 @@ else
     _X_f32 = Float32.(_LR_X)
     _y_f32 = Float32.(_LR_y)
 
-    @testset "DEERSampler GPU logistic: trajectory matches sequential MALA (same tape)" begin
+    @testset "ParallelMALASampler GPU logistic: trajectory matches sequential MALA (same tape)" begin
         rng = MersenneTwister(77)
         T = 20
         ε = 0.05f0
@@ -206,22 +206,11 @@ else
             (x, te) ->
                 ParallelMCMC.MALA.mala_step_taped(logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u)
         step_lin =
-            (x, te, a) ->
-                ParallelMCMC.MALA.mala_step_surrogate(logp_gpu, gradlogp_gpu, x, ε, te.ξ, a)
-        consts =
-            (x, te) -> (
-                ParallelMCMC.MALA.mala_accept_indicator(
-                    logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u
-                ),
-            )
+            (x, te) ->
+                ParallelMCMC.MALA.mala_step_surrogate_sigmoid(logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u)
 
         rec = ParallelMCMC.DEER.TapedRecursion(
-            step_fwd,
-            step_lin,
-            tape;
-            consts=consts,
-            const_example=(0.0f0,),
-            backend=ADTypes.AutoForwardDiff(),
+            step_fwd, step_lin, tape; backend=ADTypes.AutoForwardDiff()
         )
 
         x0_gpu = CUDA.CuArray(x0_cpu)
@@ -244,11 +233,11 @@ else
         @test Array(S_gpu) ≈ S_ref rtol=1e-4 atol=1e-5
     end
 
-    @testset "DEERSampler GPU logistic: posterior mean matches CPU" begin
+    @testset "ParallelMALASampler GPU logistic: posterior mean matches CPU" begin
         X_gpu = CUDA.CuMatrix(_X_f32)
         y_gpu = CUDA.CuVector(_y_f32)
 
-        sampler = DEERSampler(
+        sampler = ParallelMALASampler(
             0.1f0;
             T=16,
             maxiter=50,

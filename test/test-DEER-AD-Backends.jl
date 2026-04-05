@@ -21,13 +21,10 @@ function _make_rec(tape, ε, backend)
     step_fwd =
         (x, te) -> ParallelMCMC.MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
     step_lin =
-        (x, te, a) -> ParallelMCMC.MALA.mala_step_surrogate(_logp, _gradlogp, x, ε, te.ξ, a)
-    consts =
-        (x, te) ->
-            (ParallelMCMC.MALA.mala_accept_indicator(_logp, _gradlogp, x, ε, te.ξ, te.u),)
-    return ParallelMCMC.DEER.TapedRecursion(
-        step_fwd, step_lin, tape; consts=consts, const_example=(0.0,), backend=backend
-    )
+        (x, te) -> ParallelMCMC.MALA.mala_step_surrogate_sigmoid(
+            _logp, _gradlogp, x, ε, te.ξ, te.u
+        )
+    return ParallelMCMC.DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
 end
 
 #=
@@ -177,17 +174,17 @@ end
     @test S ≈ S_ref rtol=1e-5 atol=1e-6
 end
 
-@testset "DEERSampler step CPU backend=$bname" for (bname, backend) in _all_backends
+@testset "ParallelMALASampler step CPU backend=$bname" for (bname, backend) in _all_backends
     rng = MersenneTwister(7)
     D = 3
     model = DensityModel(_logp, _gradlogp, D)
-    sampler = DEERSampler(0.1; T=8, maxiter=200, jacobian=:diag, backend=backend)
+    sampler = ParallelMALASampler(0.1; T=8, maxiter=200, jacobian=:diag, backend=backend)
 
     trans, state = ParallelMCMC.AbstractMCMC.step(
         rng, model, sampler; initial_params=randn(rng, D)
     )
 
-    @test trans isa DEERTransition
+    @test trans isa ParallelMALATransition
     @test length(trans.x) == D
     @test isfinite(trans.logp)
     @test size(state.trajectory) == (D, 8)

@@ -95,7 +95,7 @@ Computing the exact diagonal of $J_t$ requires a full Jacobian (or $D$ JVPs), wh
 
 Each probe $z^{(k)}$ costs a single Jacobian-vector product (one forward-mode or reverse-mode pass), so the total cost is $O(KTD)$ — linear in $D$ and $T$.  In the limit $K \to \infty$ the estimate converges to the true diagonal.  See Zoltowski et al. (2025) [^1] for convergence analysis.
 
-In practice $K=1$ or $K=2$ probes works well; controlled by the `probes` argument of [`DEERSampler`](@ref).
+In practice $K=1$ or $K=2$ probes works well; controlled by the `probes` argument of [`ParallelMALASampler`](@ref).
 
 ---
 

@@ -20,7 +20,7 @@ The included [`MALASampler`](@ref) and [`AdaptiveMALASampler`](@ref) are sequent
 
 | Sampler | Role |
 |---|---|
-| [`DEERSampler`](@ref) | **Primary** — parallel-across-sequence MALA via DEER; O(log T) per solve |
+| [`ParallelMALASampler`](@ref) | **Primary** — parallel-across-sequence MALA via DEER; O(log T) per solve |
 | [`MALASampler`](@ref) | Baseline — sequential MALA with a fixed step size |
 | [`AdaptiveMALASampler`](@ref) | Baseline — sequential MALA with dual-averaging step-size adaptation |
 
@@ -54,7 +54,7 @@ model = DensityModel(logp, grad_logp, 2;
 ### DEER — parallel-across-sequence (primary algorithm)
 
 ```julia
-sampler = DEERSampler(0.1; T=64, jacobian=:diag)
+sampler = ParallelMALASampler(0.1; T=64, jacobian=:diag)
 
 chain = sample(model, sampler, 500;
                chain_type=MCMCChains.Chains)

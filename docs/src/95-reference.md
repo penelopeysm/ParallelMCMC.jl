@@ -13,7 +13,7 @@ DensityModel
 ```@docs
 MALASampler
 AdaptiveMALASampler
-DEERSampler
+ParallelMALASampler
 ```
 
 ## Internal types
@@ -26,8 +26,8 @@ MALAState
 MALATransition
 AdaptiveMALAState
 AdaptiveMALATransition
-DEERState
-DEERTransition
+ParallelMALAState
+ParallelMALATransition
 ```
 
 ## Index

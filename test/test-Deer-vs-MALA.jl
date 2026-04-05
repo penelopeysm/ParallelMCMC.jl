@@ -70,20 +70,12 @@ end
         (x, tt) ->
             MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
 
-    # Surrogate used ONLY for Jacobians; `a` is passed in as a DI.Constant from consts(...)
     step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-
-    # Compute accept indicator at the linearization point x, and freeze it for AD
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
+        (x, tt) -> MALA.mala_step_surrogate_sigmoid(
+            logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
         )
 
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
+    rec = DEER.TapedRecursion(step_fwd, step_lin, tape)
 
     S_deer, info = DEER.solve(
         rec,
@@ -125,15 +117,10 @@ end
         (x, tt) ->
             MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
     step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
+        (x, tt) -> MALA.mala_step_surrogate_sigmoid(
+            logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
         )
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
+    rec = DEER.TapedRecursion(step_fwd, step_lin, tape)
 
     S_deer, info = DEER.solve(
         rec,
@@ -209,16 +196,11 @@ end
         (x, tt) ->
             MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
     step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
+        (x, tt) -> MALA.mala_step_surrogate_sigmoid(
+            logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
         )
 
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
+    rec = DEER.TapedRecursion(step_fwd, step_lin, tape)
 
     S_deer, info = DEER.solve(
         rec,

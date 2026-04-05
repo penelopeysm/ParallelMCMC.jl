@@ -1,6 +1,6 @@
 # Getting Started
 
-ParallelMCMC.jl is built around **parallel-across-the-sequence** MCMC.  The core algorithm is [`DEERSampler`](@ref), which solves an entire trajectory of correlated steps simultaneously.  [`MALASampler`](@ref) and [`AdaptiveMALASampler`](@ref) are sequential MALA baselines, included mainly for correctness testing and step-size exploration before running DEER.
+ParallelMCMC.jl is built around **parallel-across-the-sequence** MCMC.  The core algorithm is [`ParallelMALASampler`](@ref), which solves an entire trajectory of correlated steps simultaneously.  [`MALASampler`](@ref) and [`AdaptiveMALASampler`](@ref) are sequential MALA baselines, included mainly for correctness testing and step-size exploration before running DEER.
 
 ## Defining a model
 
@@ -29,12 +29,12 @@ model = DensityModel(logp, grad_logp, 2; param_names=[:x1, :x2])
 
 ---
 
-## DEERSampler — the primary algorithm
+## ParallelMALASampler — the primary algorithm
 
-[`DEERSampler`](@ref) reformulates a trajectory of `T` MALA steps as a fixed-point problem and solves it via Newton iterations, each of which costs $O(\log T)$ parallel work via an associative prefix scan.  Wall-clock time per sample is therefore sublinear in chain length on multi-core CPUs and GPUs.
+[`ParallelMALASampler`](@ref) reformulates a trajectory of `T` MALA steps as a fixed-point problem and solves it via Newton iterations, each of which costs $O(\log T)$ parallel work via an associative prefix scan.  Wall-clock time per sample is therefore sublinear in chain length on multi-core CPUs and GPUs.
 
 ```julia
-sampler = DEERSampler(0.1; T=64, jacobian=:diag, damping=0.5)
+sampler = ParallelMALASampler(0.1; T=64, jacobian=:diag, damping=0.5)
 
 chain = sample(model, sampler, 500;
                chain_type=MCMCChains.Chains, progress=true)
@@ -59,7 +59,7 @@ The `jacobian` keyword controls how the per-step Jacobian is approximated during
 For high-dimensional targets, `:stoch_diag` with a small number of `probes` is a good trade-off:
 
 ```julia
-sampler = DEERSampler(0.1; T=128, jacobian=:stoch_diag, probes=2)
+sampler = ParallelMALASampler(0.1; T=128, jacobian=:stoch_diag, probes=2)
 ```
 
 ### Damping
@@ -71,13 +71,13 @@ Setting `damping < 1` blends the Newton update with the previous iterate, which 
 The prefix-scan kernel runs as pure array broadcasts and is array-type-agnostic.  To run DEER on GPU:
 
 1. Implement `logdensity` and `grad_logdensity` using GPU-compatible operations.
-2. Pass `backend = ADTypes.AutoEnzyme()` to `DEERSampler`.
+2. Pass `backend = ADTypes.AutoEnzyme()` to `ParallelMALASampler`.
 3. Pass a `CuVector` as `initial_params` to `sample`.
 
 ```julia
 using CUDA, ADTypes
 
-sampler = DEERSampler(0.1f0; T=64, backend=ADTypes.AutoEnzyme())
+sampler = ParallelMALASampler(0.1f0; T=64, backend=ADTypes.AutoEnzyme())
 
 chain = sample(model, sampler, 500;
                initial_params=CUDA.randn(Float32, 2),
@@ -104,7 +104,7 @@ end
 
 model = DensityModel(normal_model(1.5))   # param_names=[:μ] extracted automatically
 
-chain = sample(model, DEERSampler(0.1; T=64), 500;
+chain = sample(model, ParallelMALASampler(0.1; T=64), 500;
                chain_type=MCMCChains.Chains)
 ```
 
@@ -131,7 +131,7 @@ This also accepts any other `LogDensityProblems`-compatible object.
 All samplers support `MCMCThreads()`.  Start Julia with multiple threads (e.g. `julia -t 4`):
 
 ```julia
-chain = sample(model, DEERSampler(0.1; T=64), MCMCThreads(), 500, 4;
+chain = sample(model, ParallelMALASampler(0.1; T=64), MCMCThreads(), 500, 4;
                chain_type=MCMCChains.Chains)
 ```
 
@@ -145,7 +145,7 @@ chain = sample(model, DEERSampler(0.1; T=64), MCMCThreads(), 500, 4;
 
 - Verifying that a model and step size are set up correctly before running DEER
 - Obtaining a reference chain to compare against
-- Step-size exploration (run `AdaptiveMALASampler` first, read off the frozen `ε̄`, pass it to `DEERSampler`)
+- Step-size exploration (run `AdaptiveMALASampler` first, read off the frozen `ε̄`, pass it to `ParallelMALASampler`)
 
 ```julia
 # Step 1: find a good step size with adaptive MALA
@@ -156,7 +156,7 @@ baseline = sample(model, AdaptiveMALASampler(0.1; n_warmup=500), 600;
 eps_tuned = baseline[end, :step_size, 1]
 
 # Step 2: run DEER with the tuned step size
-chain = sample(model, DEERSampler(eps_tuned; T=64), 2_000;
+chain = sample(model, ParallelMALASampler(eps_tuned; T=64), 2_000;
                chain_type=MCMCChains.Chains)
 ```
 

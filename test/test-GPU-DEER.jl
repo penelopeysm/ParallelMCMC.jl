@@ -84,13 +84,10 @@ else
 
         tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
         step_fwd = (x, te) -> MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
-        step_lin = (x, te, a) -> MALA.mala_step_surrogate(_logp, _gradlogp, x, ε, te.ξ, a)
-        consts =
-            (x, te) -> (MALA.mala_accept_indicator(_logp, _gradlogp, x, ε, te.ξ, te.u),)
+        step_lin =
+            (x, te) -> MALA.mala_step_surrogate_sigmoid(_logp, _gradlogp, x, ε, te.ξ, te.u)
 
-        rec = DEER.TapedRecursion(
-            step_fwd, step_lin, tape; consts=consts, const_example=(0.0f0,), backend=backend
-        )
+        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
 
         x0_gpu = CUDA.CuArray(x0_cpu)
         S_gpu, info = DEER.solve(
@@ -128,13 +125,10 @@ else
 
         tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
         step_fwd = (x, te) -> MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
-        step_lin = (x, te, a) -> MALA.mala_step_surrogate(_logp, _gradlogp, x, ε, te.ξ, a)
-        consts =
-            (x, te) -> (MALA.mala_accept_indicator(_logp, _gradlogp, x, ε, te.ξ, te.u),)
+        step_lin =
+            (x, te) -> MALA.mala_step_surrogate_sigmoid(_logp, _gradlogp, x, ε, te.ξ, te.u)
 
-        rec = DEER.TapedRecursion(
-            step_fwd, step_lin, tape; consts=consts, const_example=(0.0f0,), backend=backend
-        )
+        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
 
         x0_gpu = CUDA.CuArray(x0_cpu)
         S_gpu, info = DEER.solve(
@@ -159,11 +153,11 @@ else
         @test Array(S_gpu) ≈ S_ref rtol=1e-3 atol=1e-4
     end
 
-    @testset "DEERSampler initial step on GPU" begin
+    @testset "ParallelMALASampler initial step on GPU" begin
         rng = MersenneTwister(7)
         D = 3
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(
+        sampler = ParallelMALASampler(
             0.05f0; T=8, maxiter=200, jacobian=:diag, backend=_gpu_backend
         )
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
@@ -172,8 +166,8 @@ else
             rng, model, sampler; initial_params=x0_gpu
         )
 
-        @test trans isa DEERTransition
-        @test state isa DEERState
+        @test trans isa ParallelMALATransition
+        @test state isa ParallelMALAState
         @test trans.x isa CUDA.CuVector
         @test length(trans.x) == D
         @test isfinite(Float32(trans.logp))
@@ -182,11 +176,11 @@ else
         @test state.t == 1
     end
 
-    @testset "DEERSampler sequential steps advance trajectory index on GPU" begin
+    @testset "ParallelMALASampler sequential steps advance trajectory index on GPU" begin
         rng = MersenneTwister(42)
         D = 3
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(
+        sampler = ParallelMALASampler(
             0.05f0; T=8, maxiter=200, jacobian=:diag, backend=_gpu_backend
         )
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
@@ -205,11 +199,11 @@ else
         @test state3.t == 3
     end
 
-    @testset "DEERSampler re-solves at trajectory boundary on GPU" begin
+    @testset "ParallelMALASampler re-solves at trajectory boundary on GPU" begin
         rng = MersenneTwister(99)
         D, T = 3, 4
         model = DensityModel(_logp, _gradlogp, D)
-        sampler = DEERSampler(
+        sampler = ParallelMALASampler(
             0.05f0; T=T, maxiter=200, jacobian=:diag, backend=_gpu_backend
         )
         x0_gpu = CUDA.CuArray(randn(rng, Float32, D))
@@ -229,11 +223,11 @@ else
         @test state_new.trajectory !== state.trajectory
     end
 
-    @testset "DEERSampler stationary distribution on GPU (standard normal)" begin
+    @testset "ParallelMALASampler stationary distribution on GPU (standard normal)" begin
         D = 3
         model = DensityModel(_logp, _gradlogp, D)
         # stoch_diag: one JVP per probe — cheaper and GPU-friendly
-        sampler = DEERSampler(
+        sampler = ParallelMALASampler(
             0.1f0;
             T=32,
             maxiter=100,
@@ -244,7 +238,7 @@ else
         )
 
         rng = MersenneTwister(2025)
-        # Collect raw DEERTransitions to avoid MCMCChains GPU array copy issues
+        # Collect raw ParallelMALATransitions to avoid MCMCChains GPU array copy issues
         raw = sample(
             rng,
             model,

@@ -189,14 +189,27 @@ function mala_step_with_logα(
 end
 
 """
-Stop-gradient surrogate step used for Jacobians.
-`a` (0 or 1) must be provided as a constant by the DEER machinery.
+Stop-gradient surrogate step used for Jacobians (paper Section 3.2, eq. stop-gradient trick).
+
+Uses a continuous sigmoid gate g = σ(logα − log u) so that AD can differentiate
+through both the proposal direction *and* the acceptance probability:
+
+    ∂x_t/∂x_{t-1} = g·J_proposal + (1−g)·I + σ′(g̃)·(∂logα/∂x)·(ỹ−x)ᵀ
+
+Forward pass: `step_fwd` (`mala_step_taped`) still uses the exact binary accept/reject.
+This function is called only inside DEER's Jacobian computation.
+
+`u` enters via `DI.Constant` in `TapedRecursion`, so `log(u)` does not contribute
+to the Jacobian — matching the stop-gradient on the acceptance threshold.
 """
-function mala_step_surrogate(
-    logp, gradlogp, x::AbstractVector, ϵ::Real, ξ::AbstractVector, a::Real; cholM=nothing
+function mala_step_surrogate_sigmoid(
+    logp, gradlogp, x::AbstractVector, ϵ::Real, ξ::AbstractVector, u::Real; cholM=nothing
 )
     y = mala_proposal(logp, gradlogp, x, ϵ, ξ; cholM=cholM)
-    return (a .* y) .+ ((1 - a) .* x)
+    logα = mala_logα(logp, gradlogp, x, y, ϵ; cholM=cholM)
+    g̃ = logα - log(u)
+    g = one(g̃) / (one(g̃) + exp(-g̃))   # σ(g̃), no external dep on sigmoid
+    return g .* y .+ (one(g) - g) .* x
 end
 
 # Apply mass matrix to a D×N matrix of gradient columns (same math as scalar,

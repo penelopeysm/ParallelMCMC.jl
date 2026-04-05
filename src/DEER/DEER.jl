@@ -3,11 +3,14 @@ module DEER
 using LinearAlgebra
 using DifferentiationInterface
 using ADTypes: ADTypes, AbstractADType
-import Mooncake: Mooncake
+import Enzyme: Enzyme
 using Random
 
 const DI = DifferentiationInterface
-const DEFAULT_BACKEND = DI.AutoMooncake(; config=nothing)
+# Enzyme forward-mode is optimal for JVPs used in :stoch_diag.
+# NOTE: On Windows, Enzyme CPU has a known LLVM unwinding issue (pinned v0.13.131).
+# For Windows CPU use, construct samplers with backend=AutoForwardDiff() explicitly.
+const DEFAULT_BACKEND = ADTypes.AutoEnzyme(; mode=Enzyme.Forward)
 
 """
 Deterministic recursion driven by a pre-generated tape.
@@ -400,8 +403,8 @@ so passing a `CuVector` for `s0_in` will yield a `CuMatrix`).
 1. Construct a `DensityModel` whose `logdensity` and `grad_logdensity` operate on
    GPU arrays.
 2. Pass `backend = AutoEnzyme()` (or another GPU-compatible `ADTypes` backend) to
-   `DEERSampler` so that DEER uses it when building the `TapedRecursion`.
-3. Pass a GPU vector as `initial_params` (or use a `DEERSampler` with a float type
+   `ParallelMALASampler` so that DEER uses it when building the `TapedRecursion`.
+3. Pass a GPU vector as `initial_params` (or use a `ParallelMALASampler` with a float type
    matching the GPU array element type).
 
 The `solve_affine_scan_diag` kernel runs as pure broadcasts and requires no
@@ -434,6 +437,16 @@ function solve(
     tol_abs ≥ 0 || throw(ArgumentError("tol_abs must be ≥ 0"))
     tol_rel ≥ 0 || throw(ArgumentError("tol_rel must be ≥ 0"))
     damping > 0 && damping ≤ 1 || throw(ArgumentError("damping must be in (0,1]"))
+
+    # GPU force-override: on GPU arrays, :diag runs D sequential JVPs which is
+    # prohibitively slow. Force :stoch_diag + probes=1 (1 JVP total), matching
+    # the paper's GPU experiments (Section 5.2, stochastic quasi-DEER).
+    on_gpu = !(s0 isa Array)
+    if on_gpu && (jacobian !== :stoch_diag || probes != 1)
+        @warn "ParallelMCMC: GPU detected — overriding to jacobian=:stoch_diag, probes=1 (paper recommendation)"
+        jacobian = :stoch_diag
+        probes = 1
+    end
 
     # Initial trajectory guess: preserve array type of s0
     S = if init === nothing

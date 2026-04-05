@@ -157,40 +157,43 @@ struct MALATapeElement{FP<:AbstractFloat,V<:AbstractVector{FP}}
 end
 
 """
-    DEERSampler(epsilon; T, maxiter, tol_abs, tol_rel, jacobian, damping, probes, cholM, backend)
+    ParallelMALASampler(epsilon; T, maxiter, tol_abs, tol_rel, jacobian, damping, probes, cholM, backend)
 
-DEER-accelerated MALA sampler.
+DEER-parallelized MALA sampler (arXiv:2508.18413, Section 3.2).
 
 DEER solves for a trajectory of `T` steps in parallel (O(log T) sweep levels),
-then the AbstractMCMC interface returns samples from that trajectory
-sequentially.  When the trajectory is exhausted a new tape is drawn and DEER
-re-solves starting from the last state.
+returning the same samples as sequential MALA up to numerical tolerance.
+The AbstractMCMC interface returns samples from that trajectory one-by-one;
+when the trajectory is exhausted a new tape is drawn and DEER re-solves from
+the last state.
+
+The Jacobian surrogate uses the sigmoid stop-gradient trick from the paper:
+`g = σ(logα − log u)` gives a differentiable approximation that captures both
+the proposal direction and the acceptance-probability gradient, while the forward
+pass remains the exact binary accept/reject.
 
 # Arguments
 - `epsilon` — MALA step size.
 - `T` — trajectory length per DEER solve (default 64).
 - `maxiter` — maximum DEER iterations per solve (default 200).
 - `tol_abs`, `tol_rel` — convergence tolerances (default 1e-6, 1e-5).
-- `jacobian` — Jacobian mode: `:diag`, `:stoch_diag`, or `:full` (default `:diag`).
-- `damping` — DEER damping in (0,1] (default 0.5; helps convergence).
-- `probes` — Hutchinson probes for `:stoch_diag` mode (default 1).
+- `jacobian` — Jacobian mode: `:stoch_diag` or `:full` (default `:stoch_diag`).
+  GPU execution always uses `:stoch_diag` with `probes=1` regardless of this setting.
+- `damping` — DEER damping factor in (0,1] (default 0.5).
+- `probes` — Hutchinson probes for `:stoch_diag` (default 1; GPU is always 1).
 - `cholM` — optional Cholesky factor of a mass matrix `M` (default `nothing` = identity).
-- `backend` — AD backend for Jacobian computation (default `AutoMooncake()`).
-  For GPU execution pass a GPU-compatible backend, e.g. `AutoEnzyme()`.
+- `backend` — AD backend (default `AutoEnzyme(mode=Enzyme.Forward)`).
+  Pass a GPU-compatible backend for GPU execution.
 
 # GPU use
-The parallel-prefix scan (`solve_affine_scan_diag`) runs as pure array broadcasts
-and is array-type-agnostic.  To run DEER on GPU:
-1. Implement `logdensity` and `grad_logdensity` using GPU-compatible operations.
-2. Pass `backend = AutoEnzyme()` (or another GPU-compatible `ADTypes` backend).
-3. Pass a GPU vector as `initial_params` to `sample`.
+Pass a GPU vector as `initial_params`.  GPU execution auto-overrides to
+`:stoch_diag`/`probes=1` (one JVP per Newton step — matches the paper's GPU experiments).
 
 # Parallel chains
-Both `MALASampler` and `DEERSampler` are compatible with
-`AbstractMCMC.sample(model, sampler, MCMCThreads(), N, nchains)`.  Each chain
-has its own immutable state so there is no shared mutable data.
+Compatible with `AbstractMCMC.sample(model, sampler, MCMCThreads(), N, nchains)`.
+Each chain has its own immutable state with no shared mutable data.
 """
-struct DEERSampler{FP<:AbstractFloat,CM,AD} <: AbstractMCMC.AbstractSampler
+struct ParallelMALASampler{FP<:AbstractFloat,CM,AD} <: AbstractMCMC.AbstractSampler
     epsilon::FP
     T::Int
     maxiter::Int
@@ -203,13 +206,13 @@ struct DEERSampler{FP<:AbstractFloat,CM,AD} <: AbstractMCMC.AbstractSampler
     backend::AD
 end
 
-function DEERSampler(
+function ParallelMALASampler(
     epsilon::Real;
     T::Int=64,
     maxiter::Int=200,
     tol_abs::Real=1e-6,
     tol_rel::Real=1e-5,
-    jacobian::Symbol=:diag,
+    jacobian::Symbol=:stoch_diag,
     damping::Real=0.5,
     probes::Int=1,
     cholM=nothing,
@@ -218,7 +221,7 @@ function DEERSampler(
     epsilon > 0 || throw(ArgumentError("epsilon must be > 0, got $epsilon"))
     eps_f = float(epsilon)
     FP = typeof(eps_f)
-    return DEERSampler{FP,typeof(cholM),typeof(backend)}(
+    return ParallelMALASampler{FP,typeof(cholM),typeof(backend)}(
         eps_f,
         T,
         maxiter,
@@ -233,15 +236,15 @@ function DEERSampler(
 end
 
 """
-State for a `DEERSampler` chain.
+State for a `ParallelMALASampler` chain.
 
-- `x` — current position (= `trajectory[:, t]`, the last returned sample).
+- `x` — current position (last returned sample).
 - `logp` — log-density at `x`.
-- `trajectory` — D×T matrix produced by the most recent DEER solve.
+- `trajectory` — D×T matrix from the most recent DEER solve.
 - `tape` — noise tape used for that solve.
 - `t` — index within `trajectory` of the last returned sample (1-indexed).
 """
-struct DEERState{V<:AbstractVector,L<:Real,M<:AbstractMatrix}
+struct ParallelMALAState{V<:AbstractVector,L<:Real,M<:AbstractMatrix}
     x::V
     logp::L
     trajectory::M
@@ -250,9 +253,9 @@ struct DEERState{V<:AbstractVector,L<:Real,M<:AbstractMatrix}
 end
 
 """
-One DEER sample: parameter vector `x` and its log-density `logp`.
+One `ParallelMALASampler` sample: parameter vector `x` and its log-density `logp`.
 """
-struct DEERTransition{V<:AbstractVector,L<:Real}
+struct ParallelMALATransition{V<:AbstractVector,L<:Real}
     x::V
     logp::L
 end
@@ -267,27 +270,29 @@ function _build_mala_deer_rec(
     logp = model.logdensity
     gradlogp = model.grad_logdensity
 
+    # step_fwd: exact binary accept/reject — defines the fixed point DEER converges to.
     step_fwd =
         (x, te) -> MALA.mala_step_taped(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
-    step_lin =
-        (x, te, a) -> MALA.mala_step_surrogate(logp, gradlogp, x, ε, te.ξ, a; cholM=cholM)
-    consts =
-        (x, te) ->
-            (MALA.mala_accept_indicator(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM),)
 
-    FP = typeof(float(ε))
-    return DEER.TapedRecursion(
-        step_fwd, step_lin, tape; consts=consts, const_example=(zero(FP),), backend=backend
-    )
+    # step_lin: sigmoid stop-gradient surrogate for Jacobian computation (paper Section 3.2).
+    # te.u enters as DI.Constant, so log(u) does not contribute to the gradient.
+    step_lin =
+        (x, te) ->
+            MALA.mala_step_surrogate_sigmoid(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
+
+    return DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
 end
 
 function _deer_solve_new_tape(
-    rng::Random.AbstractRNG, model::DensityModel, sampler::DEERSampler, x0::AbstractVector
+    rng::Random.AbstractRNG,
+    model::DensityModel,
+    sampler::ParallelMALASampler,
+    x0::AbstractVector,
 )
     D = model.dim
     T = sampler.T
     FP = typeof(sampler.epsilon)
-    # Generate noise on the same device as x0: generate on CPU then copy via copyto!.
+    # Generate noise on the same device as x0.
     # copyto!(CuVector, Vector) performs a host-to-device transfer in CUDA.jl.
     tape = map(1:T) do _
         ξ = copyto!(similar(x0, D), randn(rng, FP, D))
@@ -313,7 +318,7 @@ end
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::DEERSampler{FP};
+    sampler::ParallelMALASampler{FP};
     initial_params=nothing,
     kwargs...,
 ) where {FP}
@@ -326,27 +331,26 @@ function AbstractMCMC.step(
     S, tape = _deer_solve_new_tape(rng, model, sampler, x0)
     x1 = S[:, 1]
     logp1 = model.logdensity(x1)
-    trans = DEERTransition(x1, logp1)
-    state = DEERState(x1, logp1, S, tape, 1)
+    trans = ParallelMALATransition(x1, logp1)
+    state = ParallelMALAState(x1, logp1, S, tape, 1)
     return trans, state
 end
 
 function AbstractMCMC.step(
     rng::Random.AbstractRNG,
     model::DensityModel,
-    sampler::DEERSampler,
-    state::DEERState;
+    sampler::ParallelMALASampler,
+    state::ParallelMALAState;
     kwargs...,
 )
     T = sampler.T
     t_next = state.t + 1
 
     if t_next <= T
-        # Consume the next cached sample from the trajectory.
         x_new = state.trajectory[:, t_next]
         logp_new = model.logdensity(x_new)
-        trans = DEERTransition(x_new, logp_new)
-        new_state = DEERState(x_new, logp_new, state.trajectory, state.tape, t_next)
+        trans = ParallelMALATransition(x_new, logp_new)
+        new_state = ParallelMALAState(x_new, logp_new, state.trajectory, state.tape, t_next)
         return trans, new_state
     else
         # Trajectory exhausted — re-solve with a fresh tape.
@@ -354,17 +358,17 @@ function AbstractMCMC.step(
         S_new, tape = _deer_solve_new_tape(rng, model, sampler, x0)
         x_new = S_new[:, 1]
         logp_new = model.logdensity(x_new)
-        trans = DEERTransition(x_new, logp_new)
-        new_state = DEERState(x_new, logp_new, S_new, tape, 1)
+        trans = ParallelMALATransition(x_new, logp_new)
+        new_state = ParallelMALAState(x_new, logp_new, S_new, tape, 1)
         return trans, new_state
     end
 end
 
 function AbstractMCMC.bundle_samples(
-    samples::Vector{<:DEERTransition},
+    samples::Vector{<:ParallelMALATransition},
     model::DensityModel,
-    sampler::DEERSampler,
-    state::DEERState,
+    sampler::ParallelMALASampler,
+    state::ParallelMALAState,
     ::Type{MCMCChains.Chains};
     param_names=nothing,
     kwargs...,
