@@ -20,11 +20,14 @@ end
 function _make_rec(tape, ε, backend)
     step_fwd =
         (x, te) -> ParallelMCMC.MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
-    step_lin =
-        (x, te) -> ParallelMCMC.MALA.mala_step_surrogate_sigmoid(
-            _logp, _gradlogp, x, ε, te.ξ, te.u
-        )
-    return ParallelMCMC.DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
+    hvp_fn = (pt, dir) -> ParallelMCMC.DEER._hvp_nopre(_gradlogp, backend, pt, dir)
+    jvp = (x, te, v) -> ParallelMCMC.MALA.mala_step_surrogate_sigmoid_jvp(
+        _logp, _gradlogp, x, ε, te.ξ, te.u, v, hvp_fn
+    )
+    fwd_and_jvp = (x, te, v) -> ParallelMCMC.MALA.mala_step_taped_and_jvp(
+        _logp, _gradlogp, x, ε, te.ξ, te.u, v, hvp_fn
+    )
+    return ParallelMCMC.DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
 end
 
 #=
@@ -76,27 +79,6 @@ catch e
     @warn "Zygote not loadable, skipping" exception=e
 end
 
-#=
-For :stoch_diag mode, DEER calls DI.pushforward.  Not all backends expose this
-natively; DI may or may not provide a fallback.  We probe each loaded backend
-at test time: if prepare_pushforward succeeds, we include it in the list.
-=#
-D_PROBE, T_PROBE = 3, 4
-ε_PROBE = 0.1
-_probe_rng = MersenneTwister(0)
-_probe_x0, _probe_tape, _ = _make_tape_and_ref(_probe_rng, D_PROBE, T_PROBE, ε_PROBE)
-
-_pf_backends = Pair{String,ADTypes.AbstractADType}[]
-for (bname, backend) in _all_backends
-    try
-        rec = _make_rec(_probe_tape, ε_PROBE, backend)
-        ParallelMCMC.DEER.prepare_pushforward(rec, _probe_x0)
-        push!(_pf_backends, bname => backend)
-    catch e
-        @warn "Backend $bname does not support pushforward via DI, skipping :stoch_diag tests" exception=e
-    end
-end
-
 @testset "DEER.solve CPU backend=$bname (:diag)" for (bname, backend) in _all_backends
     rng = MersenneTwister(42)
     D, T = 4, 24
@@ -122,7 +104,7 @@ end
     @test S ≈ S_ref rtol=1e-4 atol=1e-5
 end
 
-@testset "DEER.solve CPU backend=$bname (:stoch_diag)" for (bname, backend) in _pf_backends
+@testset "DEER.solve CPU backend=$bname (:stoch_diag)" for (bname, backend) in _all_backends
     rng = MersenneTwister(42)
     D, T = 4, 24
     ε = 0.1
@@ -147,31 +129,6 @@ end
     @test size(S) == (D, T)
     @test all(isfinite, S)
     @test S ≈ S_ref rtol=1e-3 atol=1e-4
-end
-
-@testset "DEER.solve CPU backend=$bname (:full)" for (bname, backend) in _all_backends
-    rng = MersenneTwister(42)
-    D, T = 4, 24
-    ε = 0.1
-
-    x0, tape, S_ref = _make_tape_and_ref(rng, D, T, ε)
-    rec = _make_rec(tape, ε, backend)
-
-    S, info = ParallelMCMC.DEER.solve(
-        rec,
-        x0;
-        jacobian=:full,
-        damping=0.5,
-        tol_abs=1e-10,
-        tol_rel=1e-8,
-        maxiter=200,
-        return_info=true,
-    )
-
-    @test info.converged
-    @test size(S) == (D, T)
-    @test all(isfinite, S)
-    @test S ≈ S_ref rtol=1e-5 atol=1e-6
 end
 
 @testset "ParallelMALASampler step CPU backend=$bname" for (bname, backend) in _all_backends

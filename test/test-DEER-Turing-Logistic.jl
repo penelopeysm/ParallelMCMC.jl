@@ -202,16 +202,23 @@ else
         gradlogp_gpu = β -> _gradlogp_lr(β, X_gpu, y_gpu)
 
         tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
+        _backend = ADTypes.AutoForwardDiff()
         step_fwd =
             (x, te) ->
                 ParallelMCMC.MALA.mala_step_taped(logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u)
-        step_lin =
-            (x, te) ->
-                ParallelMCMC.MALA.mala_step_surrogate_sigmoid(logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u)
+        hvp_fn_gpu = (pt, dir) -> ParallelMCMC.DEER._hvp_nopre(gradlogp_gpu, _backend, pt, dir)
+        jvp =
+            (x, te, v) ->
+                ParallelMCMC.MALA.mala_step_surrogate_sigmoid_jvp(
+                    logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
+                )
+        fwd_and_jvp =
+            (x, te, v) ->
+                ParallelMCMC.MALA.mala_step_taped_and_jvp(
+                    logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
+                )
 
-        rec = ParallelMCMC.DEER.TapedRecursion(
-            step_fwd, step_lin, tape; backend=ADTypes.AutoForwardDiff()
-        )
+        rec = ParallelMCMC.DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
 
         x0_gpu = CUDA.CuArray(x0_cpu)
         S_gpu, info = ParallelMCMC.DEER.solve(

@@ -71,48 +71,19 @@ else
     reference.  This is the primary test that the AD abstraction layer
     (DifferentiationInterface) is backend-agnostic.
     =#
-    @testset "DEER.solve GPU backend=$bname (diag)" for (bname, backend) in _gpu_backends
-        rng = MersenneTwister(42)
-        D, T = 3, 16
-        ε = 0.05f0
-
-        ξs_cpu = [randn(rng, Float32, D) for _ in 1:T]
-        us = Float32.(rand(rng, T))
-        x0_cpu = randn(rng, Float32, D)
-
-        xs_seq = MALA.run_mala_sequential_taped(_logp, _gradlogp, x0_cpu, ε, ξs_cpu, us)
-
-        tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
+    function _make_gpu_rec(tape, ε, backend)
         step_fwd = (x, te) -> MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
-        step_lin =
-            (x, te) -> MALA.mala_step_surrogate_sigmoid(_logp, _gradlogp, x, ε, te.ξ, te.u)
-
-        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
-
-        x0_gpu = CUDA.CuArray(x0_cpu)
-        S_gpu, info = DEER.solve(
-            rec,
-            x0_gpu;
-            jacobian=:diag,
-            damping=0.5,
-            tol_abs=1e-6,
-            tol_rel=1e-5,
-            maxiter=200,
-            return_info=true,
+        hvp_fn = (pt, dir) -> DEER._hvp_nopre(_gradlogp, backend, pt, dir)
+        jvp = (x, te, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
+            _logp, _gradlogp, x, ε, te.ξ, te.u, v, hvp_fn
         )
-
-        @test info.converged
-        @test S_gpu isa CUDA.CuMatrix
-        @test size(S_gpu) == (D, T)
-        @test all(isfinite, Array(S_gpu))
-
-        S_ref = reduce(hcat, xs_seq[2:end])
-        @test Array(S_gpu) ≈ S_ref rtol=1e-4 atol=1e-5
+        fwd_and_jvp = (x, te, v) -> MALA.mala_step_taped_and_jvp(
+            _logp, _gradlogp, x, ε, te.ξ, te.u, v, hvp_fn
+        )
+        return DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
     end
 
-    @testset "DEER.solve GPU backend=$bname (stoch_diag)" for (bname, backend) in
-                                                              _gpu_backends
-
+    @testset "DEER.solve GPU backend=$bname (stoch_diag)" for (bname, backend) in _gpu_backends
         rng = MersenneTwister(7)
         D, T = 4, 32
         ε = 0.05f0
@@ -124,11 +95,7 @@ else
         xs_seq = MALA.run_mala_sequential_taped(_logp, _gradlogp, x0_cpu, ε, ξs_cpu, us)
 
         tape = [(ξ=CUDA.CuArray(ξs_cpu[t]), u=us[t]) for t in 1:T]
-        step_fwd = (x, te) -> MALA.mala_step_taped(_logp, _gradlogp, x, ε, te.ξ, te.u)
-        step_lin =
-            (x, te) -> MALA.mala_step_surrogate_sigmoid(_logp, _gradlogp, x, ε, te.ξ, te.u)
-
-        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; backend=backend)
+        rec = _make_gpu_rec(tape, ε, backend)
 
         x0_gpu = CUDA.CuArray(x0_cpu)
         S_gpu, info = DEER.solve(

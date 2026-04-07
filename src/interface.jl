@@ -177,8 +177,8 @@ pass remains the exact binary accept/reject.
 - `T` — trajectory length per DEER solve (default 64).
 - `maxiter` — maximum DEER iterations per solve (default 200).
 - `tol_abs`, `tol_rel` — convergence tolerances (default 1e-6, 1e-5).
-- `jacobian` — Jacobian mode: `:stoch_diag` or `:full` (default `:stoch_diag`).
-  GPU execution always uses `:stoch_diag` with `probes=1` regardless of this setting.
+- `jacobian` — Jacobian mode: `:stoch_diag` (Hutchinson, default) or `:diag` (exact diagonal,
+  D JVPs per step — useful for debugging on small CPU problems).
 - `damping` — DEER damping factor in (0,1] (default 0.5).
 - `probes` — Hutchinson probes for `:stoch_diag` (default 1; GPU is always 1).
 - `cholM` — optional Cholesky factor of a mass matrix `M` (default `nothing` = identity).
@@ -186,8 +186,8 @@ pass remains the exact binary accept/reject.
   Pass a GPU-compatible backend for GPU execution.
 
 # GPU use
-Pass a GPU vector as `initial_params`.  GPU execution auto-overrides to
-`:stoch_diag`/`probes=1` (one JVP per Newton step — matches the paper's GPU experiments).
+Pass a GPU vector as `initial_params`.  Use `jacobian=:stoch_diag` (the default) and
+`probes=1` (one JVP per Newton step — matches the paper's GPU experiments, Section 5.2).
 
 # Parallel chains
 Compatible with `AbstractMCMC.sample(model, sampler, MCMCThreads(), N, nchains)`.
@@ -270,33 +270,26 @@ function _build_mala_deer_rec(
     logp = model.logdensity
     gradlogp = model.grad_logdensity
 
+    hvp_fn = (pt, dir) -> DEER._hvp_nopre(gradlogp, backend, pt, dir)
+
     # step_fwd: exact binary accept/reject — defines the fixed point DEER converges to.
     step_fwd =
         (x, te) -> MALA.mala_step_taped(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
 
-    # step_lin: sigmoid stop-gradient surrogate, kept for :full Jacobian mode.
-    # te.u enters as DI.Constant, so log(u) does not contribute to the gradient.
-    step_lin =
-        (x, te) ->
-            MALA.mala_step_surrogate_sigmoid(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
-
-    # jvp_lin: explicit analytical JVP of step_lin w.r.t. x (paper Section 3.2 formula).
+    # jvp: explicit analytical JVP of the sigmoid surrogate w.r.t. x (paper Section 3.2).
     # Avoids nested AD when gradlogp is itself AD-computed (e.g. via LogDensityProblemsAD).
-    # Inner HVPs H(x)v are computed via a fresh DI.pushforward of gradlogp — no outer
-    # AD tracing through the MALA surrogate's control flow.
-    jvp_lin = (x, te, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
-        logp,
-        gradlogp,
-        x,
-        ε,
-        te.ξ,
-        te.u,
-        v,
-        (pt, dir) -> DEER._hvp_nopre(gradlogp, backend, pt, dir);
-        cholM=cholM,
+    # Inner HVPs H(x)v are computed via a fresh DI.pushforward of gradlogp.
+    jvp = (x, te, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
+        logp, gradlogp, x, ε, te.ξ, te.u, v, hvp_fn; cholM=cholM
     )
 
-    return DEER.TapedRecursion(step_fwd, step_lin, tape; jvp=jvp_lin, backend=backend)
+    # fwd_and_jvp: fused — shares the primal gradlogp/logp evaluations between
+    # step_fwd and the JVP, halving gradient calls per DEER time step.
+    fwd_and_jvp = (x, te, v) -> MALA.mala_step_taped_and_jvp(
+        logp, gradlogp, x, ε, te.ξ, te.u, v, hvp_fn; cholM=cholM
+    )
+
+    return DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
 end
 
 function _deer_solve_new_tape(

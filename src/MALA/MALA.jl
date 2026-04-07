@@ -372,4 +372,64 @@ function mala_step_surrogate_sigmoid_jvp(
     return g .* w .+ (y .- x) .* dg .+ (one(g) - g) .* v
 end
 
+"""
+Fused MALA forward step and JVP of the sigmoid surrogate, sharing the primal computation.
+
+Returns `(x_next, J·v)` where:
+- `x_next` is from the exact forward step (binary accept/reject)
+- `J·v` is the JVP of `mala_step_surrogate_sigmoid` at `(x, ε, ξ, u)` in direction `v`
+
+Both results share a single evaluation of `gradlogp` at `x` and at the proposal `y`,
+and a single evaluation of `logp` at `x` and `y`.  This halves the primal cost
+relative to calling `mala_step_taped` and `mala_step_surrogate_sigmoid_jvp` separately.
+
+Arguments:
+- `hvp_fn(pt, dir)`: computes H(pt) dir = ∂gradlogp(pt)/∂pt · dir (one JVP of gradlogp).
+"""
+function mala_step_taped_and_jvp(
+    logp,
+    gradlogp,
+    x::AbstractVector,
+    ε::Real,
+    ξ::AbstractVector,
+    u::Real,
+    v::AbstractVector,
+    hvp_fn;
+    cholM=nothing,
+)
+    length(x) == length(ξ) || throw(DimensionMismatch("x and ξ must have the same length"))
+    0.0 < u < 1.0 || throw(ArgumentError("u must be in (0, 1)"))
+
+    g_x = gradlogp(x)
+    y = x .+ ε .* _apply_M(g_x, cholM) .+ sqrt(2ε) .* _apply_L(ξ, cholM)
+    g_y = gradlogp(y)
+    logp_x = logp(x)
+    logp_y = logp(y)
+    logq_yx = logq_mala(y, x, g_x, ε; cholM=cholM)
+    logq_xy = logq_mala(x, y, g_y, ε; cholM=cholM)
+    logα = (logp_y + logq_xy) - (logp_x + logq_yx)
+
+    # Forward step: binary accept/reject 
+    x_next = (log(u) < logα) ? y : x
+
+    # JVP of sigmoid surrogate
+    g̃ = logα - log(u)
+    g = one(g̃) / (one(g̃) + exp(-g̃))
+
+    Hv_x = hvp_fn(x, v)
+    w = v .+ ε .* _apply_M(Hv_x, cholM)
+
+    Hv_y = hvp_fn(y, w)
+    r = x .- y .- ε .* _apply_M(g_y, cholM)
+    dr = v .- w .- ε .* _apply_M(Hv_y, cholM)
+
+    Minv_r = isnothing(cholM) ? r : cholM \ r
+    dlogα = dot(g_y, w) - dot(g_x, v) - inv(2ε) * dot(Minv_r, dr)
+
+    dg = g * (one(g) - g) * dlogα
+    jvp_out = g .* w .+ (y .- x) .* dg .+ (one(g) - g) .* v
+
+    return x_next, jvp_out
+end
+
 end # module
