@@ -146,60 +146,6 @@ function jac_diag_stoch(
 end
 
 """
-    solve_affine_scan_diag(A, B, s0)
-
-Solve the diagonal affine recurrence `s_t = A[:,t] .* s_{t-1} + B[:,t]` for t=1..T
-via an associative inclusive parallel-prefix (Hillis-Steele) scan.
-
-**Complexity**: O(log T) sequential sweep levels; each level is a single broadcast
-over all T columns — no loops or `@threads`.  The implementation is
-**array-type-agnostic**: it works identically on CPU `Matrix`, GPU `CuMatrix`, or
-any other `AbstractMatrix`.
-
-Inputs:
-- `A` :: D×T — per-step multiplicative coefficients
-- `B` :: D×T — per-step additive offsets
-- `s0` :: length-D initial state
-
-Returns:
-- `S` :: D×T (same type as A) where `S[:,t] = s_t`
-"""
-function solve_affine_scan_diag(A::AbstractMatrix, B::AbstractMatrix, s0::AbstractVector)
-    D, T = size(A)
-    size(B) == (D, T) || throw(ArgumentError("B must have the same size as A"))
-    length(s0) == D || throw(ArgumentError("s0 length must match size(A,1)"))
-
-    # Work on copies; swap buffers each level to avoid allocating inside the loop.
-    α = copy(A)
-    β = copy(B)
-    αnew = similar(α)
-    βnew = similar(β)
-
-    offset = 1
-    while offset < T
-        # Columns 1:offset are unchanged at this level.
-        αnew[:, 1:offset] .= α[:, 1:offset]
-        βnew[:, 1:offset] .= β[:, 1:offset]
-
-        # Columns offset+1:T combine with their left neighbour at distance `offset`.
-        #   αnew[:,t] = α[:,t] * α[:,t-offset]
-        #   βnew[:,t] = α[:,t] * β[:,t-offset] + β[:,t]
-        αnew[:, (offset + 1):T] .= α[:, (offset + 1):T] .* α[:, 1:(T - offset)]
-        βnew[:, (offset + 1):T] .=
-            α[:, (offset + 1):T] .* β[:, 1:(T - offset)] .+ β[:, (offset + 1):T]
-
-        α, αnew = αnew, α
-        β, βnew = βnew, β
-        offset <<= 1
-    end
-
-    # Apply initial condition: S[:,t] = α[:,t] * s0 + β[:,t]
-    S = similar(A, D, T)
-    S .= α .* reshape(s0, D, 1) .+ β
-    return S
-end
-
-"""
 Compute one DEER update given a trajectory guess `S` (D×T).
 Returns `S_new` (D×T).
 
@@ -212,8 +158,7 @@ Keywords:
 **Batched path** (GPU-efficient): when `rec.fwd_and_jvp_batch !== nothing` and
 `jacobian === :stoch_diag`, all T time steps are processed simultaneously using
 matrix operations.  A single D×T Rademacher matrix replaces T separate
-host-to-device transfers.  This mirrors the `jax.vmap` pattern in the Python
-reference implementation and eliminates T sequential kernel-launch overheads.
+host-to-device transfers.
 
 **Sequential path** (fallback): used when no batch function is available or
 `jacobian === :diag`.  When `rec.fwd_and_jvp` is set, the first (or only)
@@ -238,12 +183,6 @@ function deer_update(
     A = similar(S)
     B = similar(S)
 
-    # ------------------------------------------------------------------
-    # Batched path: process all T steps at once.
-    # Uses fwd_and_jvp_batch(Xbar, Z) -> (FT, Jt) where Xbar and Z are
-    # D×T matrices.  One call replaces T sequential fwd_and_jvp calls,
-    # enabling GPU parallelism across time steps.
-    # ------------------------------------------------------------------
     if rec.fwd_and_jvp_batch !== nothing && jacobian === :stoch_diag
         # Build D×T matrix of previous states: Xbar[:,1] = s0, Xbar[:,t] = S[:,t-1]
         Xbar = similar(S)
@@ -256,11 +195,8 @@ function deer_update(
 
         FT, Jt = rec.fwd_and_jvp_batch(Xbar, Z)
         A .= Jt
-        @. B = FT - Jt * Xbar
+        B .= FT .- Jt .* Xbar
 
-    # ------------------------------------------------------------------
-    # Sequential path: iterate over t = 1 … T.
-    # ------------------------------------------------------------------
     else
         zbuf = similar(s0, D)
 
@@ -318,10 +254,6 @@ so passing a `CuVector` for `s0_in` will yield a `CuMatrix`).
 2. Pass `backend = AutoEnzyme()` (or another GPU-compatible `ADTypes` backend) to
    `ParallelMALASampler` so that DEER uses it when building the `TapedRecursion`.
 3. Pass a GPU vector as `initial_params`.
-
-The `solve_affine_scan_diag` kernel runs as pure broadcasts and requires no
-backend-specific GPU code; only the HVP computation inside the explicit JVP depends
-on the chosen backend.
 
 Keywords:
 - `init`: initial trajectory guess D×T (default: repeat s0 across columns)
