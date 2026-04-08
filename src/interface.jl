@@ -16,38 +16,16 @@ Wraps a log-density function and its gradient for use with ParallelMCMC samplers
 - `param_names` — optional `Vector{Symbol}` of parameter names used in `MCMCChains` output.
   If `nothing` (the default), names fall back to `x[1], x[2], ...`.
 
-# Optional batched functions (required for GPU-efficient `ParallelMALASampler`)
-
-- `logdensity_batch(X::AbstractMatrix) -> AbstractVector` — evaluates `logdensity` on
-  every column of `X` (D×N) and returns a length-N vector.
-- `grad_logdensity_batch(X::AbstractMatrix) -> AbstractMatrix` — evaluates
-  `grad_logdensity` on every column of `X` and returns a D×N matrix.
-
-When both batched functions are provided, `ParallelMALASampler` switches to a
-**batched DEER update** that processes all T trajectory steps simultaneously using
-D×T matrix operations instead of a sequential loop.  This is the key for GPU
-efficiency: it replaces 6T sequential gradient calls with ~8 batched calls over
-the full matrix, mirroring JAX's `jax.vmap` pattern.
-
-For GPU (CuArray inputs), implement the batched functions via vectorised operations:
-
-```julia
-logp_batch(X) = map(t -> logp(X[:,t]), 1:size(X,2))           # CPU only
-gradlogp_batch(X) = hcat([gradlogp(X[:,t]) for t in 1:size(X,2)]...)   # CPU only
-
-# GPU: implement as true matrix operations, e.g. for a Gaussian target:
-logp_batch(X)        = -0.5f0 .* vec(sum(abs2, X; dims=1))
-gradlogp_batch(X)    = -X
-```
-
-Parameter names can also be overridden at sampling time via the `param_names` keyword
-argument of `sample(...)`.
+Optional batched functions may still be stored on the model, but the current
+`ParallelMALASampler` implementation below intentionally does **not** use the
+batched DEER update path. This keeps the codebase on the sequential/fused DEER
+path until batching is reintroduced consistently.
 """
 struct DensityModel{F,G,FB,GB} <: AbstractMCMC.AbstractModel
     logdensity::F
     grad_logdensity::G
-    logdensity_batch::FB          # (D×N AbstractMatrix) -> N-AbstractVector, or Nothing
-    grad_logdensity_batch::GB     # (D×N AbstractMatrix) -> D×N AbstractMatrix, or Nothing
+    logdensity_batch::FB
+    grad_logdensity_batch::GB
     dim::Int
     param_names::Union{Nothing,Vector{Symbol}}
 end
@@ -197,39 +175,7 @@ end
 """
     ParallelMALASampler(epsilon; T, maxiter, tol_abs, tol_rel, jacobian, damping, probes, cholM, backend)
 
-DEER-parallelized MALA sampler (arXiv:2508.18413, Section 3.2).
-
-DEER solves for a trajectory of `T` steps in parallel (O(log T) sweep levels),
-returning the same samples as sequential MALA up to numerical tolerance.
-The AbstractMCMC interface returns samples from that trajectory one-by-one;
-when the trajectory is exhausted a new tape is drawn and DEER re-solves from
-the last state.
-
-The Jacobian surrogate uses the sigmoid stop-gradient trick from the paper:
-`g = σ(logα − log u)` gives a differentiable approximation that captures both
-the proposal direction and the acceptance-probability gradient, while the forward
-pass remains the exact binary accept/reject.
-
-# Arguments
-- `epsilon` — MALA step size.
-- `T` — trajectory length per DEER solve (default 64).
-- `maxiter` — maximum DEER iterations per solve (default 200).
-- `tol_abs`, `tol_rel` — convergence tolerances (default 1e-6, 1e-5).
-- `jacobian` — Jacobian mode: `:stoch_diag` (Hutchinson, default) or `:diag` (exact diagonal,
-  D JVPs per step — useful for debugging on small CPU problems).
-- `damping` — DEER damping factor in (0,1] (default 0.5).
-- `probes` — Hutchinson probes for `:stoch_diag` (default 1; GPU is always 1).
-- `cholM` — optional Cholesky factor of a mass matrix `M` (default `nothing` = identity).
-- `backend` — AD backend (default `AutoEnzyme(mode=Enzyme.Forward)`).
-  Pass a GPU-compatible backend for GPU execution.
-
-# GPU use
-Pass a GPU vector as `initial_params`.  Use `jacobian=:stoch_diag` (the default) and
-`probes=1` (one JVP per Newton step — matches the paper's GPU experiments, Section 5.2).
-
-# Parallel chains
-Compatible with `AbstractMCMC.sample(model, sampler, MCMCThreads(), N, nchains)`.
-Each chain has its own immutable state with no shared mutable data.
+DEER-parallelized MALA sampler.
 """
 struct ParallelMALASampler{FP<:AbstractFloat,CM,AD} <: AbstractMCMC.AbstractSampler
     epsilon::FP
@@ -275,12 +221,6 @@ end
 
 """
 State for a `ParallelMALASampler` chain.
-
-- `x` — current position (last returned sample).
-- `logp` — log-density at `x`.
-- `trajectory` — D×T matrix from the most recent DEER solve.
-- `tape` — noise tape used for that solve.
-- `t` — index within `trajectory` of the last returned sample (1-indexed).
 """
 struct ParallelMALAState{V<:AbstractVector,L<:Real,M<:AbstractMatrix}
     x::V
@@ -309,52 +249,26 @@ function _build_mala_deer_rec(
     logp = model.logdensity
     gradlogp = model.grad_logdensity
 
-    hvp_fn = (pt, dir) -> DEER._hvp_nopre(gradlogp, backend, pt, dir)
+    # Prepare once and reuse for all HVPs/JVPs in this DEER block.
+    prep_hvp = DEER._prepare_hvp(gradlogp, backend, x0_like)
+    hvp_fn = (pt, dir) -> DEER._hvp_prepared(gradlogp, prep_hvp, backend, pt, dir)
 
-    # step_fwd: exact binary accept/reject — defines the fixed point DEER converges to.
+    # Exact forward step.
     step_fwd =
         (x, te) -> MALA.mala_step_taped(logp, gradlogp, x, ε, te.ξ, te.u; cholM=cholM)
 
-    # jvp: explicit analytical JVP of the sigmoid surrogate w.r.t. x (paper Section 3.2).
-    # Avoids nested AD when gradlogp is itself AD-computed (e.g. via LogDensityProblemsAD).
-    # Inner HVPs H(x)v are computed via a fresh DI.pushforward of gradlogp.
+    # Explicit analytical JVP of the surrogate step.
     jvp = (x, te, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
         logp, gradlogp, x, ε, te.ξ, te.u, v, hvp_fn; cholM=cholM
     )
 
-    # fwd_and_jvp: fused — shares the primal gradlogp/logp evaluations between
-    # step_fwd and the JVP, halving gradient calls per DEER time step.
+    # Fused forward step + JVP.
     fwd_and_jvp = (x, te, v) -> MALA.mala_step_taped_and_jvp(
         logp, gradlogp, x, ε, te.ξ, te.u, v, hvp_fn; cholM=cholM
     )
 
-    # fwd_and_jvp_batch: GPU-efficient batched path.
-    # Pre-stacks the tape (Ξ, U) into device-appropriate matrices so that
-    # each deer_update call pays only one small host-to-device transfer for U
-    # instead of T transfers.  Requires model.logdensity_batch /
-    # model.grad_logdensity_batch to be provided by the user.
-    fwd_and_jvp_batch = if model.logdensity_batch !== nothing &&
-                           model.grad_logdensity_batch !== nothing
-        logp_batch = model.logdensity_batch
-        gradlogp_batch = model.grad_logdensity_batch
-        T = length(tape)
-        D = length(x0_like)
-
-        # Pre-stack noise vectors into a D×T matrix on the same device as x0_like.
-        Ξ_stacked = similar(x0_like, D, T)
-        for t in 1:T
-            copyto!(view(Ξ_stacked, :, t), tape[t].ξ)
-        end
-        # Uniforms are CPU scalars; stack and transfer once.
-        U_stacked = copyto!(similar(x0_like, T), [tape[t].u for t in 1:T])
-
-        # The actual batch function captures the pre-stacked tape.
-        (Xbar, Z) -> MALA.mala_fwd_and_jvp_batched(
-            logp_batch, gradlogp_batch, Xbar, ε, Ξ_stacked, U_stacked, Z; cholM=cholM
-        )
-    else
-        nothing
-    end
+    # Batched path intentionally disabled for now.
+    fwd_and_jvp_batch = nothing
 
     return DEER.TapedRecursion(
         step_fwd, jvp, tape;
@@ -372,15 +286,16 @@ function _deer_solve_new_tape(
     D = model.dim
     T = sampler.T
     FP = typeof(sampler.epsilon)
-    # Generate noise on the same device as x0.
-    # copyto!(CuVector, Vector) performs a host-to-device transfer in CUDA.jl.
+
     tape = map(1:T) do _
         ξ = copyto!(similar(x0, D), randn(rng, FP, D))
         MALATapeElement(ξ, FP(rand(rng)))
     end
+
     rec = _build_mala_deer_rec(
         model, sampler.epsilon, tape, x0; cholM=sampler.cholM, backend=sampler.backend
     )
+
     S = DEER.solve(
         rec,
         x0;
@@ -433,14 +348,12 @@ function AbstractMCMC.step(
         new_state = ParallelMALAState(x_new, logp_new, state.trajectory, state.tape, t_next)
         return trans, new_state
     else
-        # Trajectory exhausted — re-solve with a fresh tape.
         x0 = state.trajectory[:, T]
         S_new, tape = _deer_solve_new_tape(rng, model, sampler, x0)
         x_new = S_new[:, 1]
         logp_new = model.logdensity(x_new)
         trans = ParallelMALATransition(x_new, logp_new)
         new_state = ParallelMALAState(x_new, logp_new, S_new, tape, 1)
-
         return trans, new_state
     end
 end
@@ -484,45 +397,6 @@ end
 
 """
     AdaptiveMALASampler(epsilon_init; n_warmup, target_accept, gamma, t0, kappa, cholM)
-
-MALA sampler with automatic step-size adaptation via dual averaging
-(Nesterov 2009, as used in NUTS — Hoffman & Gelman 2014).
-
-During the first `n_warmup` steps the step size `ε` is adapted online to drive
-the Metropolis acceptance rate toward `target_accept` (default 0.574, which is
-the asymptotically optimal rate for MALA in high dimensions).  After warmup the
-smoothed estimate `ε̄` is frozen and used for all remaining steps.
-
-# Algorithm
-At warmup step `m`, given current log-acceptance ratio `logα`:
-
-    α   = min(1, exp(logα))
-    H̄_m = (1 − 1/(m+t₀)) H̄_{m−1} + (1/(m+t₀)) (δ − α)
-    log ε_m  = μ − √m/γ · H̄_m               (instantaneous)
-    log ε̄_m  = m^(−κ) log ε_m + (1−m^(−κ)) log ε̄_{m−1}   (smoothed)
-
-where μ = log(10 ε₀) is a fixed target.  After warmup `ε̄` is used.
-
-# Keyword arguments
-- `n_warmup` — adaptation steps (default 1000).
-- `target_accept` — δ, desired acceptance rate (default 0.574).
-- `gamma` — γ, regularisation strength (default 0.05).
-- `t0` — stability offset (default 10.0).
-- `kappa` — shrinkage exponent κ ∈ (0.5, 1] (default 0.75).
-- `cholM` — optional Cholesky factor of a mass matrix `M` (default `nothing` = identity).
-
-# MCMCChains output
-The `Chains` object includes internals `[:logp, :accepted, :step_size, :is_warmup]`.
-After warmup, `step_size` is constant (the frozen `ε̄`).
-
-# Parallel chains
-Works with `MCMCThreads()`.  R-hat and ESS are computed automatically by
-`MCMCChains` from multi-chain output.
-
-# Turing.jl / LogDensityProblems
-Load `LogDensityProblems` (and optionally `LogDensityProblemsAD`) then use the
-`DensityModel(ld)` constructor to wrap any `LogDensityProblems`-compatible model
-(including Turing/DynamicPPL models) directly.
 """
 struct AdaptiveMALASampler{FP<:AbstractFloat,CM} <: AbstractMCMC.AbstractSampler
     epsilon_init::FP
@@ -560,17 +434,17 @@ end
 struct AdaptiveMALAState{V<:AbstractVector,FP<:AbstractFloat}
     x::V
     logp::FP
-    epsilon::FP        # instantaneous step size ε_m
-    epsilon_bar::FP    # smoothed step size ε̄_m  (frozen after warmup)
-    H_bar::FP          # dual-average statistic H̄_m
-    step::Int          # warmup step counter (0 = initialisation)
+    epsilon::FP
+    epsilon_bar::FP
+    H_bar::FP
+    step::Int
 end
 
 struct AdaptiveMALATransition{V<:AbstractVector,FP<:AbstractFloat}
     x::V
     logp::FP
     accepted::Bool
-    step_size::FP   # ε used for this step
+    step_size::FP
     is_warmup::Bool
 end
 
@@ -587,7 +461,7 @@ function _dual_average_update(
     γ = sampler.gamma
     t0 = sampler.t0
     κ = sampler.kappa
-    μ = log(10 * epsilon_init)   # fixed shrinkage target
+    μ = log(10 * epsilon_init)
 
     inv_mt0 = one(FP) / (FP(m) + t0)
     H_bar_new = (one(FP) - inv_mt0) * H_bar + inv_mt0 * (δ - α)
@@ -638,7 +512,6 @@ function AbstractMCMC.step(
 
     logp_next = accepted ? FP(model.logdensity(x_next)) : state.logp
 
-    # Dual-average adaptation (only during warmup)
     m_new = state.step + 1
     ε_new, ε_bar_new, H_bar_new = if in_warmup
         _dual_average_update(
@@ -668,7 +541,6 @@ function AbstractMCMC.bundle_samples(
     discard_warmup=false,
     kwargs...,
 )
-    # Optionally remove warmup samples before building the chain.
     filtered = discard_warmup ? filter(s -> !s.is_warmup, samples) : samples
     N = length(filtered)
     D = model.dim
@@ -706,35 +578,6 @@ end
     DensityModel(ld)
 
 Construct a `DensityModel` from any object `ld` that implements the
-[LogDensityProblems](https://github.com/tpapp/LogDensityProblems.jl) interface,
-i.e. provides `LogDensityProblems.logdensity`, `LogDensityProblems.logdensity_and_gradient`,
-and `LogDensityProblems.dimension`.
-
-Requires the `LogDensityProblems` package to be loaded:
-
-```julia
-using LogDensityProblems          # gradient-free: only logdensity used
-using LogDensityProblemsAD        # or this, for AD-based gradients
-```
-
-# Turing.jl example
-```julia
-using Turing, LogDensityProblems, LogDensityProblemsAD, Mooncake
-
-@model function mymodel(data)
-    μ ~ Normal(0, 1)
-    data ~ Normal(μ, 1)
-end
-
-ld  = DynamicPPL.LogDensityFunction(mymodel(obs))
-ldg = LogDensityProblemsAD.ADgradient(ADTypes.AutoMooncake(; config=nothing), ld)
-model = DensityModel(ldg)
-
-chain = sample(model, AdaptiveMALASampler(0.1; n_warmup=500), 2000;
-               chain_type=MCMCChains.Chains, progress=true)
-```
-
-This method is defined in the `LogDensityProblemsExt` extension and is only
-available when `LogDensityProblems` has been loaded.
+LogDensityProblems interface.
 """
-function DensityModel end   # extended by LogDensityProblemsExt
+function DensityModel end

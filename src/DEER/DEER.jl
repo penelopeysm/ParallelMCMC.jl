@@ -6,14 +6,11 @@ using ADTypes: ADTypes, AbstractADType
 import Enzyme: Enzyme
 using Random
 
-include("DEERScan.jl")
-using .DEERScan
-
 const DI = DifferentiationInterface
 # Enzyme forward-mode is optimal for JVPs used in :stoch_diag.
 # NOTE: On Windows, Enzyme CPU has a known LLVM unwinding issue (pinned v0.13.131).
 # For Windows CPU use, construct samplers with backend=AutoForwardDiff() explicitly.
-const DEFAULT_BACKEND = ADTypes.AutoEnzyme(; mode=Enzyme.Forward)
+const DEFAULT_BACKEND = ADTypes.AutoEnzyme(; mode=Enzyme.Forward, function_annotation=Enzyme.Duplicated)
 
 """
 Deterministic recursion driven by a pre-generated tape.
@@ -52,9 +49,42 @@ function TapedRecursion(
 end
 
 """
+Prepare a reusable pushforward object for HVP/JVP evaluations of `f`.
+
+The returned preparation object is intended to be reused across repeated calls
+with the same primal/tangent types, shape, and device placement as `x_template`.
+"""
+function _prepare_hvp(
+    f,
+    backend::AbstractADType,
+    x_template::AbstractVector,
+)
+    v_template = similar(x_template)
+    fill!(v_template, zero(eltype(x_template)))
+    return DI.prepare_pushforward(f, backend, x_template, (v_template,))
+end
+
+"""
+Use a precomputed pushforward preparation object to evaluate one HVP/JVP.
+
+This is the hot-path alternative to `_hvp_nopre`, avoiding repeated
+`prepare_pushforward` calls.
+"""
+function _hvp_prepared(
+    f,
+    prep,
+    backend::AbstractADType,
+    x::AbstractVector,
+    v::AbstractVector,
+)
+    res = DI.pushforward(f, prep, backend, x, (v,))
+    return res isa Tuple ? first(res) : res
+end
+
+"""
 Compute a single JVP of `f` at `x` in direction `v` using `backend`, preparing
-internally on every call.  Used inside explicit JVP closures (e.g. inside
-`mala_step_surrogate_sigmoid_jvp`) to compute HVPs of `gradlogp`.
+internally on every call.  Used as a fallback when no reusable prepared object
+is available.
 """
 function _hvp_nopre(
     f, backend::AbstractADType, x::AbstractVector, v::AbstractVector
@@ -303,14 +333,14 @@ function solve(
         S_new = deer_update(
             rec, s0, S; jacobian=jacobian, damping=damping, probes=probes, rng=rng
         )
-        
+
         Δ_max = maximum(abs.(S_new .- S))
         S_scale = tol_abs + tol_rel * maximum(abs.(S_new))
         metric = Δ_max / S_scale
 
         S = S_new
         last_metric = metric
-        metric ≤ 1 && (converged=true; break)
+        metric ≤ 1 && (converged = true; break)
     end
 
     return_info || return S
