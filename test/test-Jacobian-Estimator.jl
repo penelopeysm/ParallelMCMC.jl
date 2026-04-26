@@ -25,142 +25,94 @@ end
 make_affine_tape(rng::AbstractRNG, D::Int, T::Int) = [randn(rng, D) for _ in 1:T]
 
 @testset "Jacobian / surrogate tune-up" begin
-    @testset "jac_full matches analytic A on affine recursion" begin
+    @testset "jac_diag_via_jvps gives exact diagonal on affine step" begin
         rng = MersenneTwister(20251231)
         D, T = 6, 5
 
-        # Choose a well-conditioned A with a simple structure
         A = I + 0.1 .* randn(rng, D, D)
+        tape = make_affine_tape(rng, D, T)
 
-        tape = make_affine_tape(rng, D, T)  # b_t
-
+        # Explicit JVP of f(x) = A*x + b is just v -> A*v.
         step_fwd = (x, b) -> A * x + b
-        step_lin = step_fwd
-        consts = (_x, _b) -> ()
-        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=())
+        jvp = (x, b, v) -> A * v
+        rec = DEER.TapedRecursion(step_fwd, jvp, tape)
 
-        x0 = randn(rng, D)
-        prep = DEER.prepare(rec, x0)
-
-        # Check at a few time points and states
         x = randn(rng, D)
         for t in 1:T
-            J = DEER.jac_full(rec, prep, x, t)
-            @test size(J) == (D, D)
-            @test J ≈ A atol=1e-12 rtol=1e-12
+            d = DEER.jac_diag_via_jvps(rec, x, t)
+            @test size(d) == (D,)
+            @test d ≈ diag(A) atol=1e-12 rtol=1e-12
         end
     end
 
-    @testset "jac_diag_stoch approaches diag(jac_full) as probes increase" begin
+    @testset "jac_diag_stoch approaches diag(J) as probes increase (affine step)" begin
         rng = MersenneTwister(20251231)
         D, T = 8, 3
 
-        # Make A nontrivial but stable
         A = 0.6I + 0.05 .* randn(rng, D, D)
         tape = make_affine_tape(rng, D, T)
 
         step_fwd = (x, b) -> A * x + b
-        step_lin = step_fwd
-        consts = (_x, _b) -> ()
-        rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=())
-
-        x0 = randn(rng, D)
-        prepJ = DEER.prepare(rec, x0)
-        prepPF = DEER.prepare_pushforward(rec, x0)
+        jvp = (x, b, v) -> A * v
+        rec = DEER.TapedRecursion(step_fwd, jvp, tape)
 
         x = randn(rng, D)
         t = 1
-
-        J = DEER.jac_full(rec, prepJ, x, t)
-        dtrue = diag(J)
+        dtrue = diag(A)
 
         # Compare MSE averaged over multiple independent probe RNG streams
         function mse_for_probes(K::Int; nrep::Int=25)
             mses = zeros(Float64, nrep)
             for r in 1:nrep
-                rrng = MersenneTwister(10_000 + 97*r)  # deterministic independent streams
-                dest = DEER.jac_diag_stoch(rec, prepPF, x, t; probes=K, rng=rrng)
+                rrng = MersenneTwister(10_000 + 97*r)
+                dest = DEER.jac_diag_stoch(rec, x, t; probes=K, rng=rrng)
                 mses[r] = mean((dest .- dtrue) .^ 2)
             end
             return mean(mses)
         end
 
-        mse1 = mse_for_probes(1; nrep=25)
-        mse8 = mse_for_probes(8; nrep=25)
+        mse1  = mse_for_probes(1;  nrep=25)
+        mse8  = mse_for_probes(8;  nrep=25)
         mse64 = mse_for_probes(64; nrep=25)
 
-        @test mse8 < mse1
+        @test mse8  < mse1
         @test mse64 < mse8
     end
 
-    @testset "MALA acceptance gate consistency (forward vs surrogate consts)" begin
+    @testset "batched stoch_diag uses z .* Jz in DEER update" begin
         rng = MersenneTwister(20251231)
-        D = 5
-        ϵ = 0.45
+        D, T = 7, 13
 
-        x = randn(rng, D)
-        ξ = randn(rng, D)
+        Atrue = 0.65 .+ 0.1 .* randn(rng, D, T)
+        Btrue = 0.2 .* randn(rng, D, T)
+        s0 = randn(rng, D)
+        S_in = randn(rng, D, T)
 
-        y = MALA.mala_proposal(logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, ξ)
-        logα = MALA.mala_logα(logp_stdnormal_B, gradlogp_stdnormal_B, x, y, ϵ)
-
-        # Ensure logα < 0 (so τ<1) to force both accept and reject by choosing u.
-        tries = 0
-        while !(logα < -1e-8) && tries < 2_000
-            ξ = randn(rng, D)
-            y = MALA.mala_proposal(logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, ξ)
-            logα = MALA.mala_logα(logp_stdnormal_B, gradlogp_stdnormal_B, x, y, ϵ)
-            tries += 1
-        end
-        @test logα < -1e-8
-        τ = exp(logα)
-        @test 0.0 < τ < 1.0
-
-        u_acc = max(τ/2, nextfloat(0.0))         # u < τ
-        u_rej = min((τ+1.0)/2.0, prevfloat(1.0)) # u > τ
-
-        @test 0.0 < u_acc < τ
-        @test τ < u_rej < 1.0
-
-        # Build taped recursion exactly like DEER usage
-        tt_acc = (ξ=ξ, u=u_acc)
-        tt_rej = (ξ=ξ, u=u_rej)
-
-        step_fwd =
-            (x, tt) -> MALA.mala_step_taped(
-                logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, tt.u
-            )
-        step_lin =
-            (x, tt, a) -> MALA.mala_step_surrogate(
-                logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, a
-            )
-
-        consts =
-            (x, tt) -> (
-                MALA.mala_accept_indicator(
-                    logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, tt.u
-                ),
-            )
+        step_fwd = (x, t) -> view(Atrue, :, t) .* x .+ view(Btrue, :, t)
+        jvp = (x, t, v) -> view(Atrue, :, t) .* v
+        fwd_and_jvp_batch = (Xbar, Z) -> (Atrue .* Xbar .+ Btrue, Atrue .* Z)
         rec = DEER.TapedRecursion(
-            step_fwd, step_lin, [tt_acc, tt_rej]; consts=consts, const_example=(0.0,)
+            step_fwd, jvp, collect(1:T); fwd_and_jvp_batch=fwd_and_jvp_batch
         )
 
-        # consts must match forward accept decision
-        a_acc = only(consts(x, tt_acc))
-        a_rej = only(consts(x, tt_rej))
-        @test a_acc == 1.0
-        @test a_rej == 0.0
+        ws = DEER.DEERWorkspace(S_in, s0)
+        S_out = similar(S_in)
+        DEER.deer_update!(
+            ws,
+            S_out,
+            rec,
+            s0,
+            S_in;
+            jacobian=:stoch_diag,
+            probes=1,
+            rng=MersenneTwister(1),
+        )
 
-        # Surrogate semantics: a=1 -> proposal y ; a=0 -> identity x
-        @test step_lin(x, tt_acc, 1.0) == y
-        @test step_lin(x, tt_acc, 0.0) == x
-
-        # Forward semantics with forced u
-        @test step_fwd(x, tt_acc) == y
-        @test step_fwd(x, tt_rej) == x
+        S_ref = DEER.solve_affine_seq(Atrue, Btrue, s0)
+        @test S_out ≈ S_ref atol=1e-12 rtol=1e-12
     end
 
-    @testset "DEER solution satisfies recursion defects (MALA taped)" begin
+    @testset "DEER solution satisfies recursion defects (MALA taped, :diag)" begin
         rng = MersenneTwister(20251231)
         D, T = 6, 80
         ϵ = 0.35
@@ -174,20 +126,15 @@ make_affine_tape(rng::AbstractRNG, D::Int, T::Int) = [randn(rng, D) for _ in 1:T
             (x, tt) -> MALA.mala_step_taped(
                 logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, tt.u
             )
-        step_lin =
-            (x, tt, a) -> MALA.mala_step_surrogate(
-                logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, a
-            )
-        consts =
-            (x, tt) -> (
-                MALA.mala_accept_indicator(
-                    logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, tt.u
-                ),
+        hvp_fn =
+            (pt, dir) ->
+                DEER._hvp_nopre(gradlogp_stdnormal_B, DEER.DEFAULT_BACKEND, pt, dir)
+        jvp =
+            (x, tt, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
+                logp_stdnormal_B, gradlogp_stdnormal_B, x, ϵ, tt.ξ, tt.u, v, hvp_fn
             )
 
-        rec = DEER.TapedRecursion(
-            step_fwd, step_lin, tape; consts=consts, const_example=(0.0,)
-        )
+        rec = DEER.TapedRecursion(step_fwd, jvp, tape)
 
         S, info = DEER.solve(
             rec,

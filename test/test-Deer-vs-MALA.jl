@@ -27,6 +27,23 @@ function count_mala_rejections(logp, gradlogp, x0, ϵ, ξs, us)
     end
     return rejects
 end
+
+function _make_rec(tape, ε)
+    step_fwd =
+        (x, tt) -> MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ε, tt.ξ, tt.u)
+    hvp_fn =
+        (pt, dir) -> DEER._hvp_nopre(gradlogp_stdnormal, DEER.DEFAULT_BACKEND, pt, dir)
+    jvp =
+        (x, tt, v) -> MALA.mala_step_surrogate_sigmoid_jvp(
+            logp_stdnormal, gradlogp_stdnormal, x, ε, tt.ξ, tt.u, v, hvp_fn
+        )
+    fwd_and_jvp =
+        (x, tt, v) -> MALA.mala_step_taped_and_jvp(
+            logp_stdnormal, gradlogp_stdnormal, x, ε, tt.ξ, tt.u, v, hvp_fn
+        )
+    return DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
+end
+
 @testset "MALA Rejections Occur" begin
     rng = MersenneTwister(12345)
 
@@ -48,7 +65,7 @@ end
     @test rejects > 0
 end
 
-@testset "DEER recovers sequential taped MALA trajectory (matrix API)" begin
+@testset "DEER recovers sequential taped MALA trajectory (:diag)" begin
     rng = MersenneTwister(12345)
 
     D = 3
@@ -66,80 +83,13 @@ end
     @test length(xs_seq) == T + 1
 
     tape = [(ξ=ξs[t], u=us[t]) for t in 1:T]
-    step_fwd =
-        (x, tt) ->
-            MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
-
-    # Surrogate used ONLY for Jacobians; `a` is passed in as a DI.Constant from consts(...)
-    step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-
-    # Compute accept indicator at the linearization point x, and freeze it for AD
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
-        )
-
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
+    rec = _make_rec(tape, ϵ)
 
     S_deer, info = DEER.solve(
         rec,
         x0;
         jacobian=:diag,
         damping=0.5,
-        tol_abs=1e-10,
-        tol_rel=1e-8,
-        maxiter=200,
-        return_info=true,
-    )
-
-    @test info.converged
-    @test size(S_deer) == (D, T)
-
-    for t in 1:T
-        @test isapprox(view(S_deer, :, t), xs_seq[t + 1]; rtol=1e-6, atol=1e-8)
-    end
-end
-
-@testset "DEER full Jacobian matches sequential taped MALA (small case, matrix API)" begin
-    rng = MersenneTwister(2024)
-
-    D = 2
-    T = 10
-    ϵ = 0.03
-
-    x0 = randn(rng, D)
-    ξs = [randn(rng, D) for _ in 1:T]
-    us = rand(rng, T)
-
-    xs_seq = MALA.run_mala_sequential_taped(
-        logp_stdnormal, gradlogp_stdnormal, x0, ϵ, ξs, us
-    )
-
-    tape = [(ξ=ξs[t], u=us[t]) for t in 1:T]
-
-    step_fwd =
-        (x, tt) ->
-            MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
-    step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
-        )
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
-
-    S_deer, info = DEER.solve(
-        rec,
-        x0;
-        jacobian=:full,
-        damping=0.7,
         tol_abs=1e-10,
         tol_rel=1e-8,
         maxiter=200,
@@ -183,12 +133,12 @@ end
     @test isapprox(S_scan, S_ref; rtol=1e-12, atol=1e-12)
 end
 
-@testset "DEER stochastic diagonal (JVP/Hutchinson) works (matrix API)" begin
+@testset "DEER stochastic diagonal (Hutchinson) recovers MALA trajectory" begin
     rng = MersenneTwister(777)
 
     D = 3
     T = 32
-    ϵ = 0.15  # slightly larger to ensure we see some rejections and make gating relevant
+    ϵ = 0.15
 
     x0 = randn(rng, D)
     ξs = [randn(rng, D) for _ in 1:T]
@@ -205,27 +155,14 @@ end
     @test n_reject > 0
 
     tape = [(ξ=ξs[t], u=us[t]) for t in 1:T]
-    step_fwd =
-        (x, tt) ->
-            MALA.mala_step_taped(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u)
-    step_lin =
-        (x, tt, a) ->
-            MALA.mala_step_surrogate(logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, a)
-    consts =
-        (x, tt) -> (
-            MALA.mala_accept_indicator(
-                logp_stdnormal, gradlogp_stdnormal, x, ϵ, tt.ξ, tt.u
-            ),
-        )
-
-    rec = DEER.TapedRecursion(step_fwd, step_lin, tape; consts=consts, const_example=(0.0,))
+    rec = _make_rec(tape, ϵ)
 
     S_deer, info = DEER.solve(
         rec,
         x0;
         jacobian=:stoch_diag,
         probes=2,
-        rng=MersenneTwister(42),  # deterministic probes
+        rng=MersenneTwister(42),
         damping=0.5,
         tol_abs=1e-9,
         tol_rel=1e-7,
@@ -240,19 +177,14 @@ end
         @test isapprox(view(S_deer, :, t), xs_seq[t + 1]; rtol=1e-5, atol=1e-7)
     end
 
-    # Prepare both preps explicitly
-    prepJ = DEER.prepare(rec, x0)
-    prepPF = DEER.prepare_pushforward(rec, x0)
-
+    # Verify jac_diag_via_jvps and jac_diag_stoch agree on an affine-like check.
     tcheck = 5
-    xbar = xs_seq[tcheck]  # state before step tcheck (xs_seq[t] is after step t-1)
+    xbar = xs_seq[tcheck]
 
-    diag_exact = DEER.jac_diag(rec, prepJ, xbar, tcheck)
-
-    diag_est = DEER.jac_diag_stoch(
-        rec, prepPF, xbar, tcheck; probes=200, rng=MersenneTwister(123), zbuf=zeros(D)
+    diag_exact = DEER.jac_diag_via_jvps(rec, xbar, tcheck)
+    diag_est   = DEER.jac_diag_stoch(
+        rec, xbar, tcheck; probes=200, rng=MersenneTwister(123), zbuf=zeros(D)
     )
 
-    # The estimator is Monte Carlo; allow a modest tolerance.
     @test isapprox(diag_est, diag_exact; rtol=0.15, atol=0.15)
 end
