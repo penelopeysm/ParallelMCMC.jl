@@ -24,6 +24,7 @@ gradlogp_batch_deer(X) = -X
     @test s2.T == 32
     @test s2.jacobian === :stoch_diag
     @test s2.damping == 0.8
+    @test_throws ArgumentError ParallelMALASampler(0.1; jacobian=:full)
 end
 
 @testset "ParallelMALASampler initial step" begin
@@ -66,10 +67,7 @@ end
     D, T = 3, 6
     ε = 0.05
 
-    tape = [
-        ParallelMCMC.MALATapeElement(randn(rng, D), rand(rng))
-        for _ in 1:T
-    ]
+    tape = [ParallelMCMC.MALATapeElement(randn(rng, D), rand(rng)) for _ in 1:T]
     model = DensityModel(
         logp_deer,
         gradlogp_deer,
@@ -89,14 +87,7 @@ end
     U = [te.u for te in tape]
     hvp_batch_ref = (X, V) -> -V
     FT_ref, Jt_ref = ParallelMCMC.MALA.mala_step_batched_fwd_and_jvp(
-        logp_batch_deer,
-        gradlogp_batch_deer,
-        hvp_batch_ref,
-        X,
-        ε,
-        Ξ,
-        U,
-        Z,
+        logp_batch_deer, gradlogp_batch_deer, hvp_batch_ref, X, ε, Ξ, U, Z
     )
 
     @test FT_ad ≈ FT_ref atol=1e-10 rtol=1e-10
@@ -143,9 +134,7 @@ end
     )
     sampler = ParallelMALASampler(0.05; T=8)
 
-    _, state = ParallelMCMC.AbstractMCMC.step(
-        rng, model, sampler; initial_params=zeros(2)
-    )
+    _, state = ParallelMCMC.AbstractMCMC.step(rng, model, sampler; initial_params=zeros(2))
     @test batch_calls[] ≥ 1
 
     scalar_after_solve = scalar_calls[]

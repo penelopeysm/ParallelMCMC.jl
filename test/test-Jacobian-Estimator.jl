@@ -10,6 +10,27 @@ const MALA = ParallelMCMC.MALA
 logp_stdnormal_B(x) = -0.5 * dot(x, x)
 gradlogp_stdnormal_B(x) = -x
 
+struct TaggedVector{T} <: AbstractVector{T}
+    data::Vector{T}
+end
+
+Base.IndexStyle(::Type{<:TaggedVector}) = IndexLinear()
+Base.size(x::TaggedVector) = size(x.data)
+Base.axes(x::TaggedVector) = axes(x.data)
+Base.getindex(x::TaggedVector, i::Int) = x.data[i]
+Base.setindex!(x::TaggedVector, v, i::Int) = setindex!(x.data, v, i)
+function Base.similar(x::TaggedVector, ::Type{T}, dims::Dims{1}) where {T}
+    TaggedVector(Vector{T}(undef, dims[1]))
+end
+function Base.similar(x::TaggedVector, ::Type{T}, n::Int) where {T}
+    TaggedVector(Vector{T}(undef, n))
+end
+function Base.similar(x::TaggedVector, dims::Dims{1})
+    TaggedVector(Vector{eltype(x)}(undef, dims[1]))
+end
+Base.similar(x::TaggedVector, n::Int) = TaggedVector(Vector{eltype(x)}(undef, n))
+Base.copy(x::TaggedVector) = TaggedVector(copy(x.data))
+
 # Reference log q(y|x) for MALA:
 # y ~ Normal( x + ϵ∇logp(x), 2ϵ I )
 function logq_mala_ref_B(
@@ -71,12 +92,28 @@ make_affine_tape(rng::AbstractRNG, D::Int, T::Int) = [randn(rng, D) for _ in 1:T
             return mean(mses)
         end
 
-        mse1  = mse_for_probes(1;  nrep=25)
-        mse8  = mse_for_probes(8;  nrep=25)
+        mse1 = mse_for_probes(1; nrep=25)
+        mse8 = mse_for_probes(8; nrep=25)
         mse64 = mse_for_probes(64; nrep=25)
 
-        @test mse8  < mse1
+        @test mse8 < mse1
         @test mse64 < mse8
+    end
+
+    @testset "jac_diag_stoch default probe uses x-like storage" begin
+        x = TaggedVector([1.0, 2.0, 3.0])
+        tape = [1]
+        step_fwd = (x, t) -> x
+        jvp = function (x, t, v)
+            v isa TaggedVector || throw(ArgumentError("expected TaggedVector tangent"))
+            return copy(v)
+        end
+        rec = DEER.TapedRecursion(step_fwd, jvp, tape)
+
+        d = DEER.jac_diag_stoch(rec, x, 1; rng=MersenneTwister(1))
+
+        @test d isa TaggedVector
+        @test collect(d) == ones(3)
     end
 
     @testset "batched stoch_diag uses z .* Jz in DEER update" begin
@@ -98,14 +135,7 @@ make_affine_tape(rng::AbstractRNG, D::Int, T::Int) = [randn(rng, D) for _ in 1:T
         ws = DEER.DEERWorkspace(S_in, s0)
         S_out = similar(S_in)
         DEER.deer_update!(
-            ws,
-            S_out,
-            rec,
-            s0,
-            S_in;
-            jacobian=:stoch_diag,
-            probes=1,
-            rng=MersenneTwister(1),
+            ws, S_out, rec, s0, S_in; jacobian=:stoch_diag, probes=1, rng=MersenneTwister(1)
         )
 
         S_ref = DEER.solve_affine_seq(Atrue, Btrue, s0)

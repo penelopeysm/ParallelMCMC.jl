@@ -76,7 +76,9 @@ end
 
 @testset "ParallelMALASampler Turing logistic: chains output well-formed" begin
     model = DensityModel(_deer_logistic_regression(_LR_X, _LR_y))
-    sampler = ParallelMALASampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
+    sampler = ParallelMALASampler(
+        0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5
+    )
 
     chain = sample(
         MersenneTwister(42),
@@ -96,7 +98,9 @@ end
 
 @testset "ParallelMALASampler Turing logistic: posterior sign correct" begin
     model = DensityModel(_deer_logistic_regression(_LR_X, _LR_y))
-    sampler = ParallelMALASampler(0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5)
+    sampler = ParallelMALASampler(
+        0.1; T=16, maxiter=50, tol_abs=1e-4, tol_rel=1e-3, damping=0.5
+    )
 
     chain = sample(
         MersenneTwister(99),
@@ -198,17 +202,16 @@ else
         step_fwd =
             (x, te) ->
                 ParallelMCMC.MALA.mala_step_taped(logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u)
-        hvp_fn_gpu = (pt, dir) -> ParallelMCMC.DEER._hvp_nopre(gradlogp_gpu, _backend, pt, dir)
+        hvp_fn_gpu =
+            (pt, dir) -> ParallelMCMC.DEER._hvp_nopre(gradlogp_gpu, _backend, pt, dir)
         jvp =
-            (x, te, v) ->
-                ParallelMCMC.MALA.mala_step_surrogate_sigmoid_jvp(
-                    logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
-                )
+            (x, te, v) -> ParallelMCMC.MALA.mala_step_surrogate_sigmoid_jvp(
+                logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
+            )
         fwd_and_jvp =
-            (x, te, v) ->
-                ParallelMCMC.MALA.mala_step_taped_and_jvp(
-                    logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
-                )
+            (x, te, v) -> ParallelMCMC.MALA.mala_step_taped_and_jvp(
+                logp_gpu, gradlogp_gpu, x, ε, te.ξ, te.u, v, hvp_fn_gpu
+            )
 
         rec = ParallelMCMC.DEER.TapedRecursion(step_fwd, jvp, tape; fwd_and_jvp=fwd_and_jvp)
 

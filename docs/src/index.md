@@ -54,7 +54,7 @@ model = DensityModel(logp, grad_logp, 2;
 ### DEER — parallel-across-sequence (primary algorithm)
 
 ```julia
-sampler = ParallelMALASampler(0.1; T=64, jacobian=:diag)
+sampler = ParallelMALASampler(0.1; T=64, jacobian=:stoch_diag)
 
 chain = sample(model, sampler, 500;
                chain_type=MCMCChains.Chains)
