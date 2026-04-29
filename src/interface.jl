@@ -93,6 +93,10 @@ struct MALAState{V<:AbstractVector,L<:Real,W}
     workspace::W
 end
 
+"""
+One `MALASampler` sample: parameter vector `x`, its log-density `logp`, and an
+accept/reject flag.
+"""
 struct MALATransition{V<:AbstractVector,L<:Real}
     x::V
     logp::L
@@ -883,6 +887,10 @@ struct AdaptiveMALAState{V<:AbstractVector,FP<:AbstractFloat,W}
     workspace::W
 end
 
+"""
+One `AdaptiveMALASampler` sample: parameter vector `x`, its log-density `logp`,
+the step size used for that transition, and whether the sample came from warmup.
+"""
 struct AdaptiveMALATransition{V<:AbstractVector,FP<:AbstractFloat}
     x::V
     logp::FP

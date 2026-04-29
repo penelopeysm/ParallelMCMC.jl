@@ -4,6 +4,12 @@ CurrentModule = ParallelMCMC
 
 # ParallelMCMC.jl
 
+```@raw html
+<p align="center">
+  <img src="assets/logo.png" alt="ParallelMCMC logo" width="220">
+</p>
+```
+
 **ParallelMCMC.jl** is a Julia package for **parallel-across-the-sequence** MCMC — algorithms that solve an entire trajectory of $T$ correlated steps *simultaneously* rather than one at a time.
 
 ```@raw html
@@ -20,7 +26,7 @@ The flagship algorithm is **DEER** (Deterministic Equivalent-Expectation Recursi
 
 The algorithm is described in:
 
-> Zoltowski, D., Wu, Y., Gonzalez, D., Kozachkov, L., & Linderman, S. (2025).
+> Zoltowski, D. M., Wu, S., Gonzalez, X., Kozachkov, L., & Linderman, S. W. (2025).
 > **Parallelizing MCMC Across the Sequence Length.**
 > *NeurIPS 2025.* [arXiv:2508.18413](https://arxiv.org/abs/2508.18413)
 
@@ -38,10 +44,10 @@ All samplers implement the [AbstractMCMC](https://github.com/TuringLang/Abstract
 
 ## Installation
 
-ParallelMCMC.jl is a registered Julia package:
+To install the package into your current environment:
 
 ```julia-repl
-julia> ] add ParallelMCMC
+pkg> add https://github.com/rsenne/ParallelMCMC.jl
 ```
 
 ## Quick start

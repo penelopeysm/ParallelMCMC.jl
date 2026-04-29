@@ -1,11 +1,14 @@
 # ParallelMCMC
 
+<p align="center">
+  <img src="docs/src/assets/logo.png" alt="ParallelMCMC logo" width="220">
+</p>
+
 [![Stable Documentation](https://img.shields.io/badge/docs-stable-blue.svg)](https://rsenne.github.io/ParallelMCMC.jl/stable)
 [![Development documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://rsenne.github.io/ParallelMCMC.jl/dev)
 [![Test workflow status](https://github.com/rsenne/ParallelMCMC.jl/actions/workflows/Test.yml/badge.svg?branch=main)](https://github.com/rsenne/ParallelMCMC.jl/actions/workflows/Test.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/rsenne/ParallelMCMC.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/rsenne/ParallelMCMC.jl)
 [![Docs workflow Status](https://github.com/rsenne/ParallelMCMC.jl/actions/workflows/Docs.yml/badge.svg?branch=main)](https://github.com/rsenne/ParallelMCMC.jl/actions/workflows/Docs.yml?query=branch%3Amain)
-[![DOI](https://zenodo.org/badge/DOI/FIXME)](https://doi.org/FIXME)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 [![All Contributors](https://img.shields.io/github/all-contributors/rsenne/ParallelMCMC.jl?labelColor=5e1ec7&color=c0ffee&style=flat-square)](#contributors)
 [![BestieTemplate](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/JuliaBesties/BestieTemplate.jl/main/docs/src/assets/badge.json)](https://github.com/JuliaBesties/BestieTemplate.jl)
@@ -26,7 +29,7 @@ The flagship algorithm is **DEER** (Lim et al. 2024; Gonzalez et al. 2024), whic
 
 The approach and its scaling tricks (stochastic Hutchinson Jacobian estimators, damping, sliding windows) are described in:
 
-> Zoltowski, D., Wu, S., Gonzalez, X., Kozachkov, L., & Linderman, S. W. (2025).
+> Zoltowski, D. M., Wu, S., Gonzalez, X., Kozachkov, L., & Linderman, S. W. (2025).
 > **Parallelizing MCMC Across the Sequence Length.** *NeurIPS 2025.*
 > [arXiv:2508.18413](https://arxiv.org/abs/2508.18413)
 
@@ -44,10 +47,16 @@ All samplers implement the [AbstractMCMC](https://github.com/TuringLang/Abstract
 
 - **Stochastic quasi-DEER Jacobian** — single-probe Hutchinson diagonal estimator avoids the $D$ JVPs needed for an exact diagonal, making the algorithm scalable to high-dimensional targets.
 - **GPU-ready** — the Newton update and prefix scan are pure array broadcasts and run on `CuArray`s without code changes.
-- **Turing.jl / `LogDensityProblems` integration** — load `DynamicPPL` and `DensityModel(@model(...))` extracts parameter names automatically; arbitrary `LogDensityProblems`-compatible objects are also accepted.
+- **Turing.jl / `LogDensityProblems` integration** — load Turing/DynamicPPL and call `DensityModel(model(...))` to extract parameter names automatically; arbitrary `LogDensityProblems`-compatible objects are also accepted.
 - **Tape replay** — DEER consumes a fixed noise tape, so a parallel run reproduces its sequential counterpart bit-for-bit at convergence.
 
 ### Quick start
+
+Install the package from GitHub with:
+
+```julia-repl
+pkg> add https://github.com/rsenne/ParallelMCMC.jl
+```
 
 ```julia
 using ParallelMCMC, MCMCChains
@@ -69,7 +78,7 @@ If you use ParallelMCMC.jl in your work, please cite using the reference given i
 
 ## Contributing
 
-If you want to make contributions of any kind, please first that a look into our [contributing guide directly on GitHub](docs/src/90-contributing.md) or the [contributing page on the website](https://rsenne.github.io/ParallelMCMC.jl/dev/90-contributing/)
+If you want to contribute, start with the [contributing guide on GitHub](docs/src/90-contributing.md) or the [documentation site](https://rsenne.github.io/ParallelMCMC.jl/dev/90-contributing/).
 
 ---
 

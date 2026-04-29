@@ -342,16 +342,20 @@ end
 function main()
     rng = MersenneTwister(20260428)
     steps = 1000
-    maxiter = 1000
+    maxiter = 256
     epsilon = 0.095
     damping = 0.55
-    x0 = [-1.55, -1.08]
+    x0 = [
+    rand(rng) * (X_RANGE[2] - X_RANGE[1]) + X_RANGE[1],
+    rand(rng) * (Y_RANGE[2] - Y_RANGE[1]) + Y_RANGE[1],
+    ]
 
+    
     tape = make_tape(rng, 2, steps)
     rec = make_recursion(tape, epsilon)
     iterates, metrics = record_iterates(rec, x0; steps=steps, maxiter=maxiter, damping=damping)
 
-    selected = unique(round.(Int, range(0, maxiter; length=1000)))
+    selected = unique(round.(Int, range(0, maxiter; length=256)))
     selected_iterates = [iterates[i + 1] for i in selected]
 
     noise = [step.xi for step in tape]
@@ -368,11 +372,9 @@ function main()
     mktempdir() do frame_dir
         frame_paths = render_frames(frame_dir, selected_iterates, final_trajectory)
         animation_paths = vcat(frame_paths, fill(last(frame_paths), 8))
-        println("rendering ", length(animation_paths), " GIF frames")
-        tmp_output = frame_dir * ".gif"
+        tmp_output = joinpath(frame_dir, "julia_deer_posterior.gif")
         run(`$convert -delay 7 -loop 0 $animation_paths -layers Optimize $tmp_output`)
         cp(tmp_output, output; force=true)
-        rm(tmp_output; force=true)
     end
 
     final_error = maximum(abs.(last(iterates) .- final_trajectory))

@@ -70,7 +70,7 @@ The associative operator for combining two adjacent segments $(\alpha_1, \beta_1
 (\alpha_2, \beta_2) \circ (\alpha_1, \beta_1) = (\alpha_2 \odot \alpha_1,\; \alpha_2 \odot \beta_1 + \beta_2).
 ```
 
-This associativity means the recurrence can be solved by an inclusive parallel-prefix scan in $O(\log T)$ levels, each level consisting of a single broadcast over all $T$ columns — no per-timestep loops.  The implementation ([`DEER.solve_affine_scan_diag`](@ref DEER.solve_affine_scan_diag)) is array-type-agnostic and runs identically on CPU `Matrix` and GPU `CuMatrix`. Though, the CPU approach is included only for correctness testing — you will almost certainly be slower than regular sequential MCMC algorithms without a GPU.
+This associativity means the recurrence can be solved by an inclusive parallel-prefix scan in $O(\log T)$ levels, each level consisting of a single broadcast over all $T$ columns and no per-timestep loops. The implementation in `ParallelMCMC.DEERScan.solve_affine_scan_diag!` is array-type-agnostic and runs identically on CPU `Matrix` and GPU `CuMatrix`. The CPU path is mainly useful for correctness checks; without a GPU or substantial parallel hardware, sequential MCMC is usually faster wall-clock.
 
 ---
 
@@ -144,4 +144,4 @@ For low-level callers using `DEER.solve(...; workspace=ws)`, the returned trajec
 
 ## References
 
-[^1]: Zoltowski, D., Wu, Y., Gonzalez, D., Kozachkov, L., & Linderman, S. (2025). *Parallelizing MCMC Across the Sequence Length*. NeurIPS 2025. [arXiv:2508.18413](https://arxiv.org/abs/2508.18413)
+[^1]: Zoltowski, D. M., Wu, S., Gonzalez, X., Kozachkov, L., & Linderman, S. W. (2025). *Parallelizing MCMC Across the Sequence Length*. NeurIPS 2025. [arXiv:2508.18413](https://arxiv.org/abs/2508.18413)
