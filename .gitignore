@@ -14,4 +14,11 @@ docs/build/
 env
 node_modules
 LocalPreferences.toml
+
+# ignore any AI files a contributor may have
 .codex
+.claude
+CLAUDE.md
+AGENTS.md
+CODEX.md
+.gemini

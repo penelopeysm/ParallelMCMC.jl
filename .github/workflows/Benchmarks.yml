@@ -57,16 +57,18 @@ jobs:
 
       - name: Instantiate base benchmark environment
         working-directory: base/benchmarks/ParallelMCMCBenchmarks
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path=joinpath(ENV["GITHUB_WORKSPACE"], "base"))); Pkg.instantiate()'
 
       - name: Instantiate PR benchmark environment
         working-directory: head/benchmarks/ParallelMCMCBenchmarks
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.develop(PackageSpec(path=joinpath(ENV["GITHUB_WORKSPACE"], "head"))); Pkg.instantiate()'
 
       - name: Run base benchmarks
         run: |
           julia --project="$GITHUB_WORKSPACE/base/benchmarks/ParallelMCMCBenchmarks" \
-            "$GITHUB_WORKSPACE/head/benchmarks/ParallelMCMCBenchmarks/scripts/pr_benchmarks.jl" \
+            "$GITHUB_WORKSPACE/base/benchmarks/ParallelMCMCBenchmarks/scripts/pr_benchmarks.jl" \
             --seconds "$PMCMC_BENCH_SECONDS" \
             --samples "$PMCMC_BENCH_SAMPLES" \
             --output "$GITHUB_WORKSPACE/base-benchmarks.toml" \

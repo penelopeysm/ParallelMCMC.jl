@@ -3,6 +3,12 @@ module BayesLogReg
 using Random
 using LinearAlgebra
 
+function _sum_columns!(out::AbstractVector, row::AbstractMatrix, A::AbstractMatrix)
+    sum!(row, A)
+    copyto!(out, row)
+    return out
+end
+
 """
     make_data(rng, N, D; β_scale=1.0) -> (X, y, β_true)
 
@@ -79,33 +85,68 @@ end
     make_problem_batched(X, y) -> (logp_batch, gradlogp_batch)
 """
 function make_problem_batched(X::AbstractMatrix, y::AbstractVector)
-    # Pre-allocate workspaces for batch size M
-    # Note: We determine M from input size in the functions
+    N, D = size(X)
+    y_col = reshape(y, N, 1)
+
+    logits = Ref(similar(X, N, 1))
+    res = Ref(similar(X, N, 1))
+    sq = Ref(similar(X, D, 1))
+    grad = Ref(similar(X, D, 1))
+    out = Ref(similar(X, eltype(X), 1))
+    quad = Ref(similar(X, eltype(X), 1))
+    out_row = Ref(similar(X, eltype(X), 1, 1))
+    quad_row = Ref(similar(X, eltype(X), 1, 1))
+
+    function ensure_workspace!(M::Int)
+        if size(logits[], 2) != M
+            logits[] = similar(X, N, M)
+            res[] = similar(X, N, M)
+            sq[] = similar(X, D, M)
+            grad[] = similar(X, D, M)
+            out[] = similar(X, eltype(X), M)
+            quad[] = similar(X, eltype(X), M)
+            out_row[] = similar(X, eltype(X), 1, M)
+            quad_row[] = similar(X, eltype(X), 1, M)
+        end
+        return nothing
+    end
 
     function logp_batch(B::AbstractMatrix)
-        N, M = size(X, 1), size(B, 2)
-        logits = similar(X, N, M)
-        mul!(logits, X, B)
+        M = size(B, 2)
+        size(B, 1) == D || throw(DimensionMismatch("B must have size (D, M)"))
+        ensure_workspace!(M)
 
-        # In-place calculation for log-posterior
-        # Using specific buffers avoids the massive allocations in the original
-        res = similar(logits)
-        @. res = y * (-log1p(exp(-logits))) + (1 - y) * (-log1p(exp(logits)))
+        logits_buf = logits[]
+        res_buf = res[]
+        sq_buf = sq[]
+        out_buf = out[]
+        quad_buf = quad[]
 
-        # Sum over rows for the likelihood, subtract quadratic regularization
-        return vec(sum(res; dims=1)) .- 0.5 .* vec(sum(abs2, B; dims=1))
+        mul!(logits_buf, X, B)
+        @. res_buf =
+            y_col * (-log1p(exp(-logits_buf))) + (1 - y_col) * (-log1p(exp(logits_buf)))
+        @. sq_buf = abs2(B)
+        _sum_columns!(out_buf, out_row[], res_buf)
+        _sum_columns!(quad_buf, quad_row[], sq_buf)
+        @. out_buf = out_buf - 0.5 * quad_buf
+        return out_buf
     end
 
     function gradlogp_batch(B::AbstractMatrix)
-        N, M = size(X, 1), size(B, 2)
-        logits = similar(X, N, M)
-        mul!(logits, X, B)
+        M = size(B, 2)
+        size(B, 1) == D || throw(DimensionMismatch("B must have size (D, M)"))
+        ensure_workspace!(M)
 
-        @. logits = 1 / (1 + exp(-logits)) # Reuse logits buffer as p
-        resid = similar(logits)
-        @. resid = y .- logits
+        logits_buf = logits[]
+        res_buf = res[]
+        grad_buf = grad[]
 
-        return (X' * resid) .- B
+        mul!(logits_buf, X, B)
+        @. logits_buf = 1 / (1 + exp(-logits_buf))
+        @. res_buf = y_col - logits_buf
+        mul!(grad_buf, adjoint(X), res_buf)
+        @. grad_buf = grad_buf - B
+        return grad_buf
     end
 
     return logp_batch, gradlogp_batch
@@ -116,24 +157,45 @@ end
 """
 function make_problem_batched_with_hvp(X::AbstractMatrix, y::AbstractVector)
     logp_batch, gradlogp_batch = make_problem_batched(X, y)
+    N, D = size(X)
+
+    logits = Ref(similar(X, N, 1))
+    w = Ref(similar(X, N, 1))
+    Xv = Ref(similar(X, N, 1))
+    out = Ref(similar(X, D, 1))
+
+    function ensure_hvp_workspace!(M::Int)
+        if size(logits[], 2) != M
+            logits[] = similar(X, N, M)
+            w[] = similar(X, N, M)
+            Xv[] = similar(X, N, M)
+            out[] = similar(X, D, M)
+        end
+        return nothing
+    end
 
     function hvp_batch(B::AbstractMatrix, V::AbstractMatrix)
         size(B) == size(V) || throw(DimensionMismatch("B and V must have the same size"))
-        N, M = size(X, 1), size(B, 2)
+        M = size(B, 2)
+        size(B, 1) == D || throw(DimensionMismatch("B and V must have size (D, M)"))
+        ensure_hvp_workspace!(M)
 
-        # Reuse logic with pre-allocated buffers
-        logits = similar(X, N, M)
-        mul!(logits, X, B)
+        logits_buf = logits[]
+        w_buf = w[]
+        Xv_buf = Xv[]
+        out_buf = out[]
 
-        @. logits = 1 / (1 + exp(-logits)) # logits is now p
-        w = similar(logits)
-        @. w = logits * (1 - logits)
+        mul!(logits_buf, X, B)
 
-        Xv = similar(logits)
-        mul!(Xv, X, V)
-        @. Xv = w * Xv
+        @. logits_buf = 1 / (1 + exp(-logits_buf))
+        @. w_buf = logits_buf * (1 - logits_buf)
 
-        return -(X' * Xv) .- V
+        mul!(Xv_buf, X, V)
+        @. Xv_buf = w_buf * Xv_buf
+
+        mul!(out_buf, adjoint(X), Xv_buf)
+        @. out_buf = -out_buf - V
+        return out_buf
     end
 
     return logp_batch, gradlogp_batch, hvp_batch

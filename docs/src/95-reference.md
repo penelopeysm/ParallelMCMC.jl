@@ -35,7 +35,9 @@ These types appear in `MCMCChains` internals and in the `AbstractMCMC` state/tra
 
 ```@docs
 MALATapeElement
+MALAState
 MALATransition
+AdaptiveMALAState
 AdaptiveMALATransition
 ParallelMALAState
 ParallelMALATransition

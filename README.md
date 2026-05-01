@@ -43,12 +43,6 @@ The approach and its scaling tricks (stochastic Hutchinson Jacobian estimators, 
 
 All samplers implement the [AbstractMCMC](https://github.com/TuringLang/AbstractMCMC.jl) interface and return [`MCMCChains.Chains`](https://github.com/TuringLang/MCMCChains.jl) objects, so they slot into existing Turing.jl / AbstractMCMC workflows.
 
-### Key features
-
-- **Stochastic quasi-DEER Jacobian** — single-probe Hutchinson diagonal estimator avoids the $D$ JVPs needed for an exact diagonal, making the algorithm scalable to high-dimensional targets.
-- **GPU-ready** — the Newton update and prefix scan are pure array broadcasts and run on `CuArray`s without code changes.
-- **Turing.jl / `LogDensityProblems` integration** — load Turing/DynamicPPL and call `DensityModel(model(...))` to extract parameter names automatically; arbitrary `LogDensityProblems`-compatible objects are also accepted.
-- **Tape replay** — DEER consumes a fixed noise tape, so a parallel run reproduces its sequential counterpart bit-for-bit at convergence.
 
 ### Quick start
 

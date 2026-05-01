@@ -59,15 +59,17 @@ All buffers are created with the same array type / device placement as `S_templa
 (or `s0_template` for vector buffers), so the workspace is GPU-compatible when
 constructed from `CuArray` templates.
 """
-struct DEERWorkspace{M,V,SW}
+struct DEERWorkspace{M,V,SW,HZ,H}
     A::M
     B::M
     Xbar::M
     Z::M
+    Zhost::HZ
     S_work::M
     S_tmp::M
     diff_buf::M
     zbuf::V
+    zhost::H
     jt_buf::V
     xbar_buf::V
     scan::SW
@@ -78,15 +80,17 @@ function DEERWorkspace(S_template::AbstractMatrix, s0_template::AbstractVector)
     B = similar(S_template)
     Xbar = similar(S_template)
     Z = similar(S_template)
+    Zhost = Z isa CUDA.CuArray ? Matrix{eltype(S_template)}(undef, size(Z)...) : nothing
     S_work = similar(S_template)
     S_tmp = similar(S_template)
     diff_buf = similar(S_template)
     zbuf = similar(s0_template)
+    zhost = zbuf isa CUDA.CuArray ? Vector{eltype(s0_template)}(undef, length(s0_template)) : nothing
     jt_buf = similar(s0_template)
     xbar_buf = similar(s0_template)
     scan = DEERScan.AffineScanWorkspace(S_template)
     return DEERWorkspace(
-        A, B, Xbar, Z, S_work, S_tmp, diff_buf, zbuf, jt_buf, xbar_buf, scan
+        A, B, Xbar, Z, Zhost, S_work, S_tmp, diff_buf, zbuf, zhost, jt_buf, xbar_buf, scan
     )
 end
 
@@ -194,12 +198,25 @@ end
 end
 
 @inline function _rademacher!(z::CUDA.CuArray{T}, rng::AbstractRNG) where {T}
-    CUDA.rand!(z)
-    @. z = ifelse(z < T(0.5), -one(T), one(T))
+    host = Vector{T}(undef, length(z))
+    _rademacher!(z, rng, host)
     return z
 end
 
+@inline function _rademacher!(
+    z::CUDA.CuArray{T}, rng::AbstractRNG, host::AbstractArray{T}
+) where {T}
+    length(host) == length(z) || throw(DimensionMismatch("host buffer must match z"))
+    _rademacher!(host, rng)
+    copyto!(z, host)
+    return z
+end
+
+@inline _rademacher!(z::AbstractArray, rng::AbstractRNG, ::Nothing) = _rademacher!(z, rng)
+
 @inline _rademacher_matrix!(Z::AbstractMatrix, rng::AbstractRNG) = _rademacher!(Z, rng)
+@inline _rademacher_matrix!(Z::AbstractMatrix, rng::AbstractRNG, host) =
+    _rademacher!(Z, rng, host)
 
 function jac_diag_via_jvps(rec::TapedRecursion, x::AbstractVector, t::Int)
     D = length(x)
@@ -281,12 +298,12 @@ function deer_update!(
             copyto!(Xbar, D + 1, S_in, 1, D * (T - 1))
         end
 
-        _rademacher_matrix!(Z, rng)
+        _rademacher_matrix!(Z, rng, ws.Zhost)
 
         FT, Jt = rec.fwd_and_jvp_batch(Xbar, Z)
         @. A = Z * Jt
         for _ in 2:probes
-            _rademacher_matrix!(Z, rng)
+            _rademacher_matrix!(Z, rng, ws.Zhost)
             _, Jt = rec.fwd_and_jvp_batch(Xbar, Z)
             @. A += Z * Jt
         end
@@ -308,7 +325,7 @@ function deer_update!(
             end
 
             if jacobian === :stoch_diag
-                _rademacher!(zbuf, rng)
+                _rademacher!(zbuf, rng, ws.zhost)
                 ft, jvp1 = if rec.fwd_and_jvp !== nothing
                     rec.fwd_and_jvp(xbar, rec.tape[t], zbuf)
                 else
@@ -317,7 +334,7 @@ function deer_update!(
 
                 @. jt_buf = zbuf * jvp1
                 for _ in 2:probes
-                    _rademacher!(zbuf, rng)
+                    _rademacher!(zbuf, rng, ws.zhost)
                     jvp_k = rec.jvp(xbar, rec.tape[t], zbuf)
                     @. jt_buf += zbuf * jvp_k
                 end

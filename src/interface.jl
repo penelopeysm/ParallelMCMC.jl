@@ -87,10 +87,15 @@ function MALASampler(epsilon::Real; cholM=nothing)
     return MALASampler{typeof(eps_f),typeof(cholM)}(eps_f, cholM)
 end
 
-struct MALAState{V<:AbstractVector,L<:Real,W}
+"""
+State for a `MALASampler` chain.
+"""
+struct MALAState{V<:AbstractVector,L<:Real,W,NV<:AbstractVector,H}
     x::V
     logp::L
     workspace::W
+    noise::NV
+    noise_host::H
 end
 
 """
@@ -103,12 +108,19 @@ struct MALATransition{V<:AbstractVector,L<:Real}
     accepted::Bool
 end
 
-function _randn_like(
-    rng::Random.AbstractRNG, x::AbstractVector, ::Type{FP}, D::Int
-) where {FP}
+function _make_noise_buffer(x::AbstractVector, ::Type{FP}, D::Int) where {FP}
     ξ = similar(x, FP, D)
+    host = ξ isa CUDA.CuArray ? Vector{FP}(undef, D) : nothing
+    return ξ, host
+end
+
+function _randn_like!(
+    rng::Random.AbstractRNG, ξ::AbstractVector{FP}, host::Union{Nothing,AbstractVector{FP}}
+) where {FP}
     if ξ isa CUDA.CuArray
-        copyto!(ξ, randn(rng, FP, D))
+        host === nothing && error("CuArray normal noise requires a reusable host buffer")
+        randn!(rng, host)
+        copyto!(ξ, host)
     else
         randn!(rng, ξ)
     end
@@ -129,8 +141,9 @@ function AbstractMCMC.step(
     end
     logp_val = model.logdensity(x)
     ws = MALA.MALAWorkspace(x)
+    noise, noise_host = _make_noise_buffer(x, FP, model.dim)
     t = MALATransition(x, logp_val, true)
-    s = MALAState(x, logp_val, ws)
+    s = MALAState(x, logp_val, ws, noise, noise_host)
     return t, s
 end
 
@@ -145,7 +158,7 @@ function AbstractMCMC.step(
     ϵ = sampler.epsilon
     D = model.dim
 
-    ξ = _randn_like(rng, x, eltype(x), D)
+    ξ = _randn_like!(rng, state.noise, state.noise_host)
     u = rand(rng)
 
     x_next = similar(x)
@@ -163,7 +176,7 @@ function AbstractMCMC.step(
 
     logp_val = accepted ? model.logdensity(x_next) : state.logp
     t = MALATransition(x_next, logp_val, accepted)
-    s = MALAState(x_next, logp_val, state.workspace)
+    s = MALAState(x_next, logp_val, state.workspace, state.noise, state.noise_host)
     return t, s
 end
 
@@ -877,7 +890,11 @@ function AdaptiveMALASampler(
     )
 end
 
-struct AdaptiveMALAState{V<:AbstractVector,FP<:AbstractFloat,W}
+"""
+State for an `AdaptiveMALASampler` chain, including dual-averaging adaptation
+statistics.
+"""
+struct AdaptiveMALAState{V<:AbstractVector,FP<:AbstractFloat,W,NV<:AbstractVector,H}
     x::V
     logp::FP
     epsilon::FP
@@ -885,6 +902,8 @@ struct AdaptiveMALAState{V<:AbstractVector,FP<:AbstractFloat,W}
     H_bar::FP
     step::Int
     workspace::W
+    noise::NV
+    noise_host::H
 end
 
 """
@@ -937,9 +956,18 @@ function AbstractMCMC.step(
     end
     logp_val = FP(model.logdensity(x))
     ws = MALA.MALAWorkspace(x)
+    noise, noise_host = _make_noise_buffer(x, FP, model.dim)
     trans = AdaptiveMALATransition(x, logp_val, true, sampler.epsilon_init, true)
     state = AdaptiveMALAState(
-        x, logp_val, sampler.epsilon_init, sampler.epsilon_init, zero(FP), 0, ws
+        x,
+        logp_val,
+        sampler.epsilon_init,
+        sampler.epsilon_init,
+        zero(FP),
+        0,
+        ws,
+        noise,
+        noise_host,
     )
     return trans, state
 end
@@ -955,7 +983,7 @@ function AbstractMCMC.step(
     in_warmup = state.step < sampler.n_warmup
     ε = in_warmup ? state.epsilon : state.epsilon_bar
 
-    ξ = _randn_like(rng, state.x, eltype(state.x), D)
+    ξ = _randn_like!(rng, state.noise, state.noise_host)
     u = rand(rng)
 
     x_next = similar(state.x)
@@ -989,7 +1017,15 @@ function AbstractMCMC.step(
 
     trans = AdaptiveMALATransition(x_next, logp_next, accepted, ε, in_warmup)
     new_state = AdaptiveMALAState(
-        x_next, logp_next, ε_new, ε_bar_new, H_bar_new, m_new, state.workspace
+        x_next,
+        logp_next,
+        ε_new,
+        ε_bar_new,
+        H_bar_new,
+        m_new,
+        state.workspace,
+        state.noise,
+        state.noise_host,
     )
     return trans, new_state
 end

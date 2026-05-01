@@ -2,8 +2,7 @@
 
 using ParallelMCMCBenchmarks
 
-include(joinpath(@__DIR__, "..", "src", "pr_suite.jl"))
-const PRSuite = ParallelMCMCPrBenchmarks
+const PRSuite = ParallelMCMCBenchmarks.ParallelMCMCPrBenchmarks
 
 function _option(args, name, default=nothing)
     index = findfirst(==(name), args)
