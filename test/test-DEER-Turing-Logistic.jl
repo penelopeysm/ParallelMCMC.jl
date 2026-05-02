@@ -8,7 +8,6 @@ using ParallelMCMC
 
 using DynamicPPL
 using LogDensityProblems
-using LogDensityProblemsAD
 using ADTypes
 using Distributions: MvNormal, Bernoulli
 

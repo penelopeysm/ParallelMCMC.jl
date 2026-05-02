@@ -8,9 +8,8 @@ using ParallelMCMC
 
 using DynamicPPL
 using LogDensityProblems
-using LogDensityProblemsAD
 using ADTypes
-using Distributions: Normal, MvNormal
+using Distributions: Beta, Normal, MvNormal
 
 # A simple 1-D normal likelihood:  μ ~ N(0,1),  y | μ ~ N(μ, 0.5)
 # Posterior:  μ | y=1.5  is N(μ_post, σ_post²)
@@ -30,11 +29,19 @@ end
     y ~ MvNormal(μ, 0.5 * I)
 end
 
-@testset "LogDensityProblemsExt: param_names kwarg" begin
-    ld = DynamicPPL.LogDensityFunction(normal_model(TRUE_OBS))
-    ldg = LogDensityProblemsAD.ADgradient(ADTypes.AutoEnzyme(), ld)
+@model function beta_model()
+    x ~ Beta(2, 2)
+end
 
-    model = DensityModel(ldg; param_names=[:μ])
+@testset "LogDensityProblemsExt: param_names kwarg" begin
+    ld = DynamicPPL.LogDensityFunction(
+        normal_model(TRUE_OBS),
+        DynamicPPL.getlogjoint_internal,
+        DynamicPPL.LinkAll();
+        adtype=ADTypes.AutoEnzyme(),
+    )
+
+    model = DensityModel(ld; param_names=[:μ])
 
     @test model.dim == 1
     @test model.param_names == [:μ]
@@ -58,6 +65,15 @@ end
     @test model.param_names == [:μ]
     @test isfinite(model.logdensity([0.0]))
     @test isfinite(model.grad_logdensity([0.0])[1])
+end
+
+@testset "DynamicPPLExt: convenience constructor uses linked space for constrained models" begin
+    model = DensityModel(beta_model())
+
+    @test model.dim == 1
+    @test model.param_names == [:x]
+    @test isfinite(model.logdensity([-0.4]))
+    @test isfinite(model.grad_logdensity([-0.4])[1])
 end
 
 @testset "DynamicPPLExt: generic Turing model works with ParallelMALA and default Enzyme HVP" begin
