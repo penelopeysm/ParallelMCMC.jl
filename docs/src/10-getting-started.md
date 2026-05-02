@@ -110,16 +110,21 @@ chain = sample(model, ParallelMALASampler(0.1; T=64), 500;
 
 ### Manual `LogDensityProblems` path
 
-For explicit control over the AD backend, wrap the model yourself:
+For explicit control over the AD backend, construct the `LogDensityFunction`
+directly with DynamicPPL's `adtype` interface:
 
 ```julia
-using Turing, LogDensityProblems, LogDensityProblemsAD, ADTypes
+using Turing, LogDensityProblems, ADTypes
 using ParallelMCMC, MCMCChains
 
-ld  = DynamicPPL.LogDensityFunction(normal_model(1.5))
-ldg = LogDensityProblemsAD.ADgradient(ADTypes.AutoEnzyme(), ld)
+ld = DynamicPPL.LogDensityFunction(
+    normal_model(1.5),
+    DynamicPPL.getlogjoint_internal,
+    DynamicPPL.LinkAll();
+    adtype=ADTypes.AutoEnzyme(),
+)
 
-model = DensityModel(ldg; param_names=[:μ])
+model = DensityModel(ld; param_names=[:μ])
 ```
 
 This also accepts any other `LogDensityProblems`-compatible object.

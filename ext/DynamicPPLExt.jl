@@ -5,16 +5,15 @@ using ADTypes: ADTypes
 using DynamicPPL: DynamicPPL
 using Enzyme: Enzyme
 using LogDensityProblems: LogDensityProblems
-using LogDensityProblemsAD: LogDensityProblemsAD
 
 """
     DensityModel(turing_model::DynamicPPL.Model; ad_backend=ADTypes.AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse), function_annotation=Enzyme.Duplicated), hvp=nothing)
 
 Convenience constructor: wraps a DynamicPPL/Turing `@model` directly as a
 `DensityModel`, automatically extracting parameter names and wiring up gradient
-computation via `LogDensityProblemsAD`.
+computation via DynamicPPL's `adtype` interface.
 
-Requires `DynamicPPL` and `LogDensityProblemsAD` to be loaded.
+Requires `DynamicPPL` to be loaded.
 
 # Example
 ```julia
@@ -45,24 +44,28 @@ function ParallelMCMC.DensityModel(
     ),
     hvp=nothing,
 )
-    # Build the LogDensityProblems-compatible gradient object
-    ld = DynamicPPL.LogDensityFunction(turing_model)
-    ldg = LogDensityProblemsAD.ADgradient(ad_backend, ld)
+    # Sample in linked/unconstrained space and let DynamicPPL provide the gradient.
+    ld = DynamicPPL.LogDensityFunction(
+        turing_model,
+        DynamicPPL.getlogjoint_internal,
+        DynamicPPL.LinkAll();
+        adtype=ad_backend,
+    )
 
-    caps = LogDensityProblems.capabilities(ldg)
+    caps = LogDensityProblems.capabilities(ld)
     caps isa LogDensityProblems.LogDensityOrder{0} && error(
         "AD gradient setup failed. The wrapped model must support gradients. " *
         "Ensure your ad_backend is compatible.",
     )
 
-    dim = LogDensityProblems.dimension(ldg)
+    dim = LogDensityProblems.dimension(ld)
 
     # Try to extract parameter names; fall back to nothing on any error or mismatch.
     param_names = _try_extract_param_names(turing_model, dim)
 
     logp(x) = LogDensityProblems.logdensity(ld, x)
     function gradlogp(x)
-        _, g = LogDensityProblems.logdensity_and_gradient(ldg, x)
+        _, g = LogDensityProblems.logdensity_and_gradient(ld, x)
         return g
     end
 
