@@ -60,7 +60,7 @@ function ParallelMCMC.DensityModel(
     # Try to extract parameter names; fall back to nothing on any error or mismatch.
     param_names = _try_extract_param_names(turing_model, dim)
 
-    logp(x) = LogDensityProblems.logdensity(ldg, x)
+    logp(x) = LogDensityProblems.logdensity(ld, x)
     function gradlogp(x)
         _, g = LogDensityProblems.logdensity_and_gradient(ldg, x)
         return g

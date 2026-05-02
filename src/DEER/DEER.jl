@@ -16,9 +16,11 @@ const DEFAULT_BACKEND = ADTypes.AutoEnzyme(;
 )
 const DEFAULT_HVP_BACKEND = DI.SecondOrder(
     DEFAULT_BACKEND,
+    # The log-density function itself is non-active in the reverse pass.
+    # Marking it duplicated makes DynamicPPL closure fields look active to Enzyme.
     ADTypes.AutoEnzyme(;
         mode=Enzyme.set_runtime_activity(Enzyme.Reverse),
-        function_annotation=Enzyme.Duplicated,
+        function_annotation=Enzyme.Const,
     ),
 )
 

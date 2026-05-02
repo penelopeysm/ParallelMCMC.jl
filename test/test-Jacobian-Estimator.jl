@@ -116,6 +116,51 @@ make_affine_tape(rng::AbstractRNG, D::Int, T::Int) = [randn(rng, D) for _ in 1:T
         @test collect(d) == ones(3)
     end
 
+    @testset "Rademacher and DEER argument validation paths" begin
+        rng = MersenneTwister(20260203)
+        z = zeros(Float64, 12)
+        out = DEER._rademacher!(z, rng)
+        @test out === z
+        @test all(abs.(z) .== 1)
+
+        D, T = 3, 4
+        tape = collect(1:T)
+        step_fwd = (x, t) -> 0.8 .* x .+ t
+        jvp = (x, t, v) -> 0.8 .* v
+        rec = DEER.TapedRecursion(step_fwd, jvp, tape)
+        x = randn(rng, D)
+
+        @test_throws ArgumentError DEER.jac_diag_stoch(
+            rec, x, 1; probes=0, rng=MersenneTwister(1)
+        )
+        @test_throws ArgumentError DEER.jac_diag_stoch(
+            rec, x, 1; zbuf=zeros(D + 1), rng=MersenneTwister(1)
+        )
+
+        S = randn(rng, D, T)
+        S_out = similar(S)
+        s0 = randn(rng, D)
+        ws = DEER.DEERWorkspace(S, s0)
+
+        @test_throws ArgumentError DEER.deer_update!(
+            ws, S_out, rec, s0, S; jacobian=:full
+        )
+        @test_throws ArgumentError DEER.deer_update!(
+            ws, S_out, rec, s0, S; damping=0.0
+        )
+        @test_throws ArgumentError DEER.deer_update!(
+            ws, S_out, rec, s0, S; probes=0
+        )
+        @test_throws ArgumentError DEER.deer_update!(
+            ws, randn(rng, D, T + 1), rec, s0, S
+        )
+
+        @test_throws ArgumentError DEER.solve(rec, s0; maxiter=0)
+        @test_throws ArgumentError DEER.solve(rec, s0; tol_abs=-1.0)
+        @test_throws ArgumentError DEER.solve(rec, s0; tol_rel=-1.0)
+        @test_throws ArgumentError DEER.solve(rec, s0; init=randn(rng, D, T + 1))
+    end
+
     @testset "batched stoch_diag uses z .* Jz in DEER update" begin
         rng = MersenneTwister(20251231)
         D, T = 7, 13
