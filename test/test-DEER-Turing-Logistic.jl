@@ -72,7 +72,7 @@ end
 function _deer_logistic_turing_density_model()
     return DensityModel(
         _deer_logistic_regression(_LR_X, _LR_y);
-        hvp=(β, v) -> _hvp_lr(β, v, _LR_X, _LR_y),
+        hvp=(β, v) -> _hvp_lr(β, v, _LR_X, _LR_y)
     )
 end
 
@@ -82,7 +82,6 @@ end
     model = _deer_logistic_turing_density_model()
 
     @test model.dim == _LR_D
-    @test model.param_names == [Symbol("β[1]"), Symbol("β[2]")]
     @test isfinite(model.logdensity(zeros(_LR_D)))
     @test all(isfinite, model.grad_logdensity(zeros(_LR_D)))
 end

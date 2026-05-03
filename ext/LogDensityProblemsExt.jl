@@ -45,7 +45,7 @@ chain = sample(model, AdaptiveMALASampler(0.3; n_warmup=500), 2_000;
 If DynamicPPL is loaded, the simpler one-step constructor `DensityModel(mymodel(obs))`
 is also available and extracts parameter names automatically.
 """
-function ParallelMCMC.DensityModel(ld; param_names=nothing)
+function ParallelMCMC.DensityModel(ld; param_names=nothing, hvp=nothing)
     caps = LogDensityProblems.capabilities(ld)
     caps isa LogDensityProblems.LogDensityOrder{0} && error(
         "LogDensityProblems model must support gradients (LogDensityOrder{1} or higher). " *
@@ -54,14 +54,15 @@ function ParallelMCMC.DensityModel(ld; param_names=nothing)
 
     dim = LogDensityProblems.dimension(ld)
 
-    logp(x) = LogDensityProblems.logdensity(ld, x)
+    logp = ParallelMCMC.LogDensityProblemPrimal(ld)
+    gradlogp = ParallelMCMC.LogDensityProblemGradient(ld)
 
-    function gradlogp(x)
-        _, g = LogDensityProblems.logdensity_and_gradient(ld, x)
-        return g
-    end
+    return ParallelMCMC.DensityModel(logp, gradlogp, dim; param_names=param_names, hvp=hvp)
+end
 
-    return ParallelMCMC.DensityModel(logp, gradlogp, dim; param_names=param_names)
+(l::ParallelMCMC.LogDensityProblemPrimal)(x) = LogDensityProblems.logdensity(l.ld, x)
+function (l::ParallelMCMC.LogDensityProblemGradient)(x)
+    return last(LogDensityProblems.logdensity_and_gradient(l.ld, x))
 end
 
 end # module

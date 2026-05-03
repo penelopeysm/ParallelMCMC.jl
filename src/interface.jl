@@ -67,6 +67,28 @@ function DensityModel(
     )
 end
 
+# Callable structs that allow us to dispatch on the type of the LogDensityProblems object in
+# the postprocessing stage. Ideally these would be defined in the LogDensityProblemsExt.
+# However, structs defined in extensions are hard to get hold of so we define them here.
+# The callable behaviour itself is implemented in LogDensityProblemsExt.
+struct LogDensityProblemPrimal{L}
+    ld::L
+end
+struct LogDensityProblemGradient{L}
+    ld::L
+end
+
+"""
+    postprocess_sample(model::DensityModel, transition)
+
+Optional step to postprocess raw transitions from the sampler. Overloading
+this allows us to, for example, transform samples from unconstrained space
+back to the original parameter space when wrapping a DynamicPPL model.
+
+By default, this function returns the transition unchanged.
+"""
+postprocess_sample(::DensityModel, transition) = transition
+
 """
     MALASampler(epsilon; cholM=nothing)
 
@@ -144,7 +166,7 @@ function AbstractMCMC.step(
     noise, noise_host = _make_noise_buffer(x, FP, model.dim)
     t = MALATransition(x, logp_val, true)
     s = MALAState(x, logp_val, ws, noise, noise_host)
-    return t, s
+    return postprocess_sample(model, t), s
 end
 
 function AbstractMCMC.step(
@@ -177,7 +199,7 @@ function AbstractMCMC.step(
     logp_val = accepted ? model.logdensity(x_next) : state.logp
     t = MALATransition(x_next, logp_val, accepted)
     s = MALAState(x_next, logp_val, state.workspace, state.noise, state.noise_host)
-    return t, s
+    return postprocess_sample(model, t), s
 end
 
 function AbstractMCMC.bundle_samples(
@@ -557,12 +579,13 @@ function _sample_parallel_mala_chain(
     rng::Random.AbstractRNG,
     model::DensityModel,
     sampler::ParallelMALASampler,
-    N::Int;
+    N::Int,
+    ::Type{Tchn};
     initial_params=nothing,
     param_names=nothing,
     progress=AbstractMCMC.PROGRESS[],
     progressname="Sampling",
-)
+) where {Tchn}
     D = model.dim
     names = _parallel_mala_param_names(model, D, param_names)
     internal_names = [:logp]
@@ -601,6 +624,17 @@ function _sample_parallel_mala_chain(
         end
     end
 
+    return _construct_chain(Tchn, vals, internals, names, internal_names, model)
+end
+
+function _construct_chain(
+    ::Type{MCMCChains.Chains},
+    vals::AbstractMatrix{Float64},
+    internals::AbstractMatrix{Float64},
+    names::Vector{Symbol},
+    internal_names::Vector{Symbol},
+    model::DensityModel,
+)
     return MCMCChains.Chains(
         hcat(vals, internals),
         vcat(names, internal_names),
@@ -732,7 +766,8 @@ function AbstractMCMC.mcmcsample(
             rng,
             model,
             sampler,
-            N_int;
+            N_int,
+            chain_type;
             initial_params=initial_params,
             param_names=param_names,
             progress=progress,
@@ -776,7 +811,7 @@ function AbstractMCMC.step(
     logp1 = logps[1]
     trans = ParallelMALATransition(x1, logp1)
     state = ParallelMALAState(x1, logp1, S, logps, ws, tape, 1)
-    return trans, state
+    return postprocess_sample(model, trans), state
 end
 
 function AbstractMCMC.step(
@@ -802,7 +837,7 @@ function AbstractMCMC.step(
             state.tape,
             t_next,
         )
-        return trans, new_state
+        return postprocess_sample(model, trans), new_state
     else
         x0 = state.trajectory[:, T]
         S_new, tape, ws = _deer_solve_new_tape(
@@ -813,7 +848,7 @@ function AbstractMCMC.step(
         logp_new = logps[1]
         trans = ParallelMALATransition(x_new, logp_new)
         new_state = ParallelMALAState(x_new, logp_new, S_new, logps, ws, tape, 1)
-        return trans, new_state
+        return postprocess_sample(model, trans), new_state
     end
 end
 
@@ -969,7 +1004,7 @@ function AbstractMCMC.step(
         noise,
         noise_host,
     )
-    return trans, state
+    return postprocess_sample(model, trans), state
 end
 
 function AbstractMCMC.step(
@@ -1027,7 +1062,7 @@ function AbstractMCMC.step(
         state.noise,
         state.noise_host,
     )
-    return trans, new_state
+    return postprocess_sample(model, trans), new_state
 end
 
 function AbstractMCMC.bundle_samples(
