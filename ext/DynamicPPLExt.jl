@@ -91,7 +91,7 @@ function AbstractMCMC.bundle_samples(
     kwargs...,
 )
     if discard_warmup
-        ts = filter(t -> hasproperty(t.stats, :is_warmup) && !t.stats.is_warmup, ts)
+        ts = filter(t -> !hasproperty(t.stats, :is_warmup) || !t.stats.is_warmup, ts)
     end
     return AbstractMCMC.from_samples(MCMCChains.Chains, hcat(ts))
 end
