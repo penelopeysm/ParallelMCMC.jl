@@ -4,7 +4,7 @@ using ParallelMCMC
 using LogDensityProblems: LogDensityProblems
 
 """
-    DensityModel(ld; param_names=nothing)
+    DensityModel(ld; param_names=nothing, hvp=nothing)
 
 Construct a `DensityModel` from any object implementing the
 [LogDensityProblems](https://github.com/tpapp/LogDensityProblems.jl) interface.
@@ -19,6 +19,8 @@ The optional `param_names` keyword accepts a `Vector{Symbol}` of parameter names
 that will be used for the columns of the returned `MCMCChains.Chains` object.
 If omitted, names default to `x[1], x[2], ...` unless you also pass `param_names`
 to `sample(...)`.
+
+The `hvp` keyword argument is forwarded to the main `DensityModel` constructor.
 
 # Turing.jl / DynamicPPL example
 ```julia
