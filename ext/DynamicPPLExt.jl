@@ -3,7 +3,9 @@ module DynamicPPLExt
 using ParallelMCMC
 using ADTypes: ADTypes
 using DynamicPPL: DynamicPPL
+using AbstractMCMC: AbstractMCMC
 using Enzyme: Enzyme
+using MCMCChains: MCMCChains
 using LogDensityProblems: LogDensityProblems
 
 """
@@ -28,13 +30,6 @@ model = DensityModel(mymodel(1.5))
 chain = sample(model, AdaptiveMALASampler(0.3; n_warmup=500), 2_000;
                chain_type=MCMCChains.Chains, discard_warmup=true, progress=true)
 ```
-
-# Notes
-- Parameter names are extracted from the model's prior. For most common
-  distributions (Normal, MvNormal, Exponential, etc.) the names match the
-  unconstrained parameter space used by LogDensityProblems. If the extracted
-  names do not match the dimensionality (e.g. due to simplex constraints), the
-  constructor falls back to generic `x[1], x[2], ...` names with a warning.
 """
 function ParallelMCMC.DensityModel(
     turing_model::DynamicPPL.Model;
@@ -51,58 +46,102 @@ function ParallelMCMC.DensityModel(
         DynamicPPL.LinkAll();
         adtype=ad_backend,
     )
-
-    caps = LogDensityProblems.capabilities(ld)
-    caps isa LogDensityProblems.LogDensityOrder{0} && error(
-        "AD gradient setup failed. The wrapped model must support gradients. " *
-        "Ensure your ad_backend is compatible.",
-    )
-
-    dim = LogDensityProblems.dimension(ld)
-
-    # Try to extract parameter names; fall back to nothing on any error or mismatch.
-    param_names = _try_extract_param_names(turing_model, dim)
-
-    logp(x) = LogDensityProblems.logdensity(ld, x)
-    function gradlogp(x)
-        _, g = LogDensityProblems.logdensity_and_gradient(ld, x)
-        return g
-    end
-
-    return ParallelMCMC.DensityModel(logp, gradlogp, dim; hvp=hvp, param_names=param_names)
+    # Requires LogDensityProblemsExt to be loaded
+    return ParallelMCMC.DensityModel(ld; hvp=hvp)
 end
 
+######################
+# Chain construction #
+######################
+# In this section, we define overloads for DynamicPPL-based models so that resulting chains
+# are converted back into the original parameter space and contain the correct parameter
+# names. This is done by converting the raw samples (vectors of parameters) back into
+# `DynamicPPL.ParamsWithStats` objects.
+
+const ParallelMCMCTransitionTypes = Union{
+    ParallelMCMC.MALATransition,
+    ParallelMCMC.AdaptiveMALATransition,
+    ParallelMCMC.ParallelMALATransition,
+}
+# Types that represent LogDensityProblems objects that wrap DynamicPPL models.
+const LDFPrimal = ParallelMCMC.LogDensityProblemPrimal{<:DynamicPPL.LogDensityFunction}
+const LDFGradient = ParallelMCMC.LogDensityProblemGradient{<:DynamicPPL.LogDensityFunction}
+const DensityModelLDF = ParallelMCMC.DensityModel{<:LDFPrimal,<:LDFGradient}
+
 """
-Extract flat parameter names from a DynamicPPL model by sampling from the prior.
-Returns a `Vector{Symbol}` if the count matches `expected_dim`, otherwise `nothing`.
+    getstats(sample::ParallelMCMCTransitionTypes)
+
+Get a `NamedTuple` of stats from an MCMC transition.
 """
-function _try_extract_param_names(model::DynamicPPL.Model, expected_dim::Int)
-    try
-        vi = DynamicPPL.VarInfo(model)
-        names = Symbol[]
-        for vn in keys(vi)
-            val = vi[vn]
-            sym = DynamicPPL.getsym(vn)
-            if val isa Number
-                push!(names, Symbol(sym))
-            else
-                for i in 1:length(val)
-                    push!(names, Symbol("$(sym)[$i]"))
-                end
-            end
+getstats(sample::ParallelMCMC.MALATransition) = (accepted=sample.accepted,)
+function getstats(sample::ParallelMCMC.AdaptiveMALATransition)
+    return (
+        accepted=sample.accepted, step_size=sample.step_size, is_warmup=sample.is_warmup
+    )
+end
+getstats(::ParallelMCMCTransitionTypes) = (;)
+
+"""
+    is_warmup(sample::ParallelMCMCTransitionTypes)
+
+Check if a sample is from the warmup phase of MCMC sampling.
+"""
+is_warmup(::ParallelMCMCTransitionTypes) = false
+is_warmup(sample::ParallelMCMC.AdaptiveMALATransition) = sample.is_warmup
+
+for (Ttrans, Tspl, Tstate) in (
+    (ParallelMCMC.MALATransition, ParallelMCMC.MALASampler, ParallelMCMC.MALAState),
+    (
+        ParallelMCMC.ParallelMALATransition,
+        ParallelMCMC.ParallelMALASampler,
+        ParallelMCMC.ParallelMALAState,
+    ),
+    (
+        ParallelMCMC.AdaptiveMALATransition,
+        ParallelMCMC.AdaptiveMALASampler,
+        ParallelMCMC.AdaptiveMALAState,
+    ),
+)
+    @eval begin
+        function AbstractMCMC.bundle_samples(
+            ts::Vector{<:$Ttrans},
+            model::DensityModelLDF,
+            spl::$Tspl,
+            state::$Tstate,
+            chain_type::Type{MCMCChains.Chains};
+            discard_warmup::Bool=false,
+            kwargs...,
+        )
+            ts = discard_warmup ? filter(t -> !is_warmup(t), ts) : ts
+            return make_processed_dynamicppl_chain(MCMCChains.Chains, ts, model)
         end
-        if length(names) == expected_dim
-            return names
-        else
-            @warn "ParallelMCMC: parameter name extraction produced $(length(names)) names " *
-                "but model has $expected_dim unconstrained dimensions " *
-                "(likely due to bijector dimension changes, e.g. Dirichlet/LKJ constraints). " *
-                "Falling back to generic x[1], x[2], ... names."
-            return nothing
-        end
-    catch
-        return nothing
     end
+end
+
+function make_processed_dynamicppl_chain(
+    ::Type{Tchain}, ts::Vector{<:ParallelMCMCTransitionTypes}, model::DensityModelLDF
+) where {Tchain}
+    pwss = map(ts) do t
+        # Note: This assumes that there is always a field called t.x. This is currently true
+        # of all samplers in ParallelMCMC
+        DynamicPPL.ParamsWithStats(t.x, model.logdensity.ld, getstats(t))
+    end
+    return AbstractMCMC.from_samples(Tchain, hcat(pwss))
+end
+
+function ParallelMCMC._construct_chain(
+    ::Type{MCMCChains.Chains},
+    vals::AbstractMatrix{<:Real},
+    internals::AbstractMatrix{<:Real},
+    ::Vector{Symbol},
+    internal_names::Vector{Symbol},
+    model::DensityModelLDF,
+)
+    pwss = map(zip(eachrow(vals), eachrow(internals))) do (val, internal)
+        stats = NamedTuple{Tuple(internal_names)}(internal)
+        DynamicPPL.ParamsWithStats(val, model.logdensity.ld, stats)
+    end
+    return AbstractMCMC.from_samples(MCMCChains.Chains, hcat(pwss))
 end
 
 end # module

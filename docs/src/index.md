@@ -91,7 +91,8 @@ chain = sample(model, sampler, 2_000;
 
 ### Turing.jl integration
 
-When `DynamicPPL` (part of Turing.jl) is loaded, a one-argument `DensityModel` constructor is available that wraps a `@model` directly, extracting parameter names automatically:
+When `DynamicPPL` (part of Turing.jl) is loaded, a one-argument `DensityModel` constructor is available that wraps a `@model` directly.
+Parameter names are automatically extracted, and values transformed back to the original model space:
 
 ```julia
 using Turing, ParallelMCMC, MCMCChains

@@ -4,7 +4,7 @@ using ParallelMCMC
 using LogDensityProblems: LogDensityProblems
 
 """
-    DensityModel(ld; param_names=nothing)
+    DensityModel(ld; param_names=nothing, hvp=nothing)
 
 Construct a `DensityModel` from any object implementing the
 [LogDensityProblems](https://github.com/tpapp/LogDensityProblems.jl) interface.
@@ -19,6 +19,8 @@ The optional `param_names` keyword accepts a `Vector{Symbol}` of parameter names
 that will be used for the columns of the returned `MCMCChains.Chains` object.
 If omitted, names default to `x[1], x[2], ...` unless you also pass `param_names`
 to `sample(...)`.
+
+The `hvp` keyword argument is forwarded to the main `DensityModel` constructor.
 
 # Turing.jl / DynamicPPL example
 ```julia
@@ -45,7 +47,7 @@ chain = sample(model, AdaptiveMALASampler(0.3; n_warmup=500), 2_000;
 If DynamicPPL is loaded, the simpler one-step constructor `DensityModel(mymodel(obs))`
 is also available and extracts parameter names automatically.
 """
-function ParallelMCMC.DensityModel(ld; param_names=nothing)
+function ParallelMCMC.DensityModel(ld; param_names=nothing, hvp=nothing)
     caps = LogDensityProblems.capabilities(ld)
     caps isa LogDensityProblems.LogDensityOrder{0} && error(
         "LogDensityProblems model must support gradients (LogDensityOrder{1} or higher). " *
@@ -54,14 +56,15 @@ function ParallelMCMC.DensityModel(ld; param_names=nothing)
 
     dim = LogDensityProblems.dimension(ld)
 
-    logp(x) = LogDensityProblems.logdensity(ld, x)
+    logp = ParallelMCMC.LogDensityProblemPrimal(ld)
+    gradlogp = ParallelMCMC.LogDensityProblemGradient(ld)
 
-    function gradlogp(x)
-        _, g = LogDensityProblems.logdensity_and_gradient(ld, x)
-        return g
-    end
+    return ParallelMCMC.DensityModel(logp, gradlogp, dim; param_names=param_names, hvp=hvp)
+end
 
-    return ParallelMCMC.DensityModel(logp, gradlogp, dim; param_names=param_names)
+(l::ParallelMCMC.LogDensityProblemPrimal)(x) = LogDensityProblems.logdensity(l.ld, x)
+function (l::ParallelMCMC.LogDensityProblemGradient)(x)
+    return last(LogDensityProblems.logdensity_and_gradient(l.ld, x))
 end
 
 end # module
