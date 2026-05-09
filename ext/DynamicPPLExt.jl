@@ -112,7 +112,7 @@ for (Ttrans, Tspl, Tstate) in (
             discard_warmup::Bool=false,
             kwargs...,
         )
-            ts = discard_warmup ? filter(is_warmup, ts) : ts
+            ts = discard_warmup ? filter(t -> !is_warmup(t), ts) : ts
             return make_processed_dynamicppl_chain(MCMCChains.Chains, ts, model)
         end
     end
