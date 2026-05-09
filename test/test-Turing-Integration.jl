@@ -103,10 +103,9 @@ end
             MersenneTwister(11), model, sampler; initial_params=[0.0]
         )
 
-        @test trans isa DynamicPPL.ParamsWithStats
+        @test trans isa ParallelMALATransition
         @test state isa ParallelMALAState
-        @test only(keys(trans.params)) == @varname(μ)
-        @test isfinite(trans.stats.logjoint)
+        @test isfinite(trans.logp)
         @test all(isfinite, state.trajectory)
     end
 end
