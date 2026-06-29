@@ -2,7 +2,7 @@ using Test
 using Random
 using LinearAlgebra
 using Statistics
-using MCMCChains
+using FlexiChains
 
 using ParallelMCMC
 const MALA_iface = ParallelMCMC.MALA
@@ -138,19 +138,16 @@ gradlogp_iface(x) = -x
         model = DensityModel(logp_iface, gradlogp_iface, 2)
         sampler = MALASampler(0.15)
 
-        chain = sample(model, sampler, 200; chain_type=MCMCChains.Chains, progress=false)
+        chain = sample(model, sampler, 200; chain_type=VNChain, progress=false)
 
-        @test chain isa MCMCChains.Chains
-        @test size(chain, 1) == 200
+        @test chain isa VNChain
+        @test FlexiChains.niters(chain) == 200
 
         # Parameter columns present
-        param_names = names(chain, :parameters)
-        @test length(param_names) == 2
+        @test only(FlexiChains.parameters(chain)) == @varname(x)
 
         # Internal columns present
-        internal_names = names(chain, :internals)
-        @test :logp in internal_names
-        @test :accepted in internal_names
+        @test Set(FlexiChains.extras(chain)) == Set(FlexiChains.Extra.([:logp, :accepted]))
 
         # logp values should be finite
         @test all(isfinite, chain[:logp])
@@ -164,19 +161,90 @@ gradlogp_iface(x) = -x
         model = DensityModel(logp_iface, gradlogp_iface, 2)
         sampler = MALASampler(0.15)
 
-        chain = sample(
-            model,
-            sampler,
-            50;
-            chain_type=MCMCChains.Chains,
-            progress=false,
-            param_names=[:mu, :sigma],
-        )
+        @testset "with scalar-valued symbols" begin
+            chain = sample(
+                model,
+                sampler,
+                50;
+                chain_type=SymChain,
+                progress=false,
+                param_names=[:mu, :sigma],
+            )
 
-        @test chain isa MCMCChains.Chains
-        param_names = names(chain, :parameters)
-        @test :mu in param_names
-        @test :sigma in param_names
+            @test chain isa SymChain
+            @test FlexiChains.parameters(chain) == [:mu, :sigma]
+        end
+
+        @testset "symbol param names and VarName chain" begin
+            chain = sample(
+                model,
+                sampler,
+                50;
+                chain_type=VNChain,
+                progress=false,
+                param_names=[:mu, :sigma],
+            )
+
+            @test chain isa VNChain
+            @test FlexiChains.parameters(chain) == [@varname(mu), @varname(sigma)]
+        end
+
+        @testset "with vector-valued symbols" begin
+            chain = sample(
+                model,
+                sampler,
+                50;
+                chain_type=SymChain,
+                progress=false,
+                param_names=[:param => (2,)],
+            )
+
+            @test chain isa SymChain
+            @test FlexiChains.parameters(chain) == [:param]
+            @test size(chain[:param, stack=true]) == (50, 1, 2)
+        end
+
+        @testset "with vector-valued varnames" begin
+            chain = sample(
+                model,
+                sampler,
+                50;
+                chain_type=VNChain,
+                progress=false,
+                param_names=[@varname(param) => (2,)],
+            )
+
+            @test chain isa VNChain
+            @test FlexiChains.parameters(chain) == [@varname(param)]
+            @test size(chain[@varname(param), stack=true]) == (50, 1, 2)
+        end
+    end
+
+    @testset "invalid param_names throws" begin
+        model = DensityModel(logp_iface, gradlogp_iface, 2)
+        @test_throws "param_names must be a collection" sample(
+            model, MALASampler(0.15), 50;
+            chain_type=SymChain, progress=false, param_names=["mu", "sigma"],
+        )
+    end
+
+    @testset "model.param_names used when sample() omits param_names" begin
+        # Constructing the model with `param_names` and then calling `sample` *without*
+        # the `param_names` keyword should fall back to `model.param_names`.
+        model = DensityModel(logp_iface, gradlogp_iface, 2; param_names=[:mu, :sigma])
+        sampler = MALASampler(0.15)
+
+        @testset "SymChain" begin
+            chain = sample(model, sampler, 50; chain_type=SymChain, progress=false)
+            @test chain isa SymChain
+            @test FlexiChains.parameters(chain) == [:mu, :sigma]
+        end
+
+        @testset "VNChain" begin
+            chain = sample(model, sampler, 50; chain_type=VNChain, progress=false)
+            @test chain isa VNChain
+            @test FlexiChains.parameters(chain) == [@varname(mu), @varname(sigma)]
+        end
     end
 
     @testset "stationary distribution via sample()" begin
@@ -189,12 +257,12 @@ gradlogp_iface(x) = -x
             model,
             sampler,
             20_000;
-            chain_type=MCMCChains.Chains,
+            chain_type=VNChain,
             progress=false,
         )
 
         burn = 3_000
-        post = Array(chain[burn:end, :, :])  # (N-burn) × D
+        post = Array(chain)[burn:end, :, :]  # (N-burn) × D
 
         mu = vec(mean(post; dims=1))
         @test maximum(abs.(mu)) < 0.1

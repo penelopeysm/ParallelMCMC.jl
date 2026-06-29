@@ -2,7 +2,7 @@ using Test
 using Random
 using LinearAlgebra
 using Statistics
-using MCMCChains
+using FlexiChains
 
 using ParallelMCMC
 using ADTypes
@@ -216,17 +216,43 @@ end
         model,
         sampler,
         100;
-        chain_type=MCMCChains.Chains,
+        chain_type=SymChain,
         progress=false,
     )
 
-    @test chain isa MCMCChains.Chains
-    @test size(chain, 1) == 100
-    @test :logp in names(chain, :internals)
+    @test chain isa SymChain
+    @test FlexiChains.niters(chain) == 100
+    @test FlexiChains.Extra(:logp) in FlexiChains.extras(chain)
     @test all(isfinite, chain[:logp])
 
-    param_names = names(chain, :parameters)
-    @test length(param_names) == 2
+    # Single vector-valued parameter, each sample having length 2
+    param_names = FlexiChains.parameters(chain)
+    @test length(param_names) == 1
+    name = only(param_names)
+    @test size(chain[name, stack=true], 3) == 2
+end
+
+@testset "ParallelMALASampler bundle_samples fallback path (thinning)" begin
+    #= A non-default kwarg forces ParallelMALA's `mcmcsample`
+    override down the generic step/bundle_samples path instead of the
+    batched `_sample_parallel_mala_chain` shortcut =#
+    model = DensityModel(logp_deer, gradlogp_deer, 2)
+    sampler = ParallelMALASampler(0.05; T=16, backend=_AD)
+
+    chain = sample(
+        MersenneTwister(1),
+        model,
+        sampler,
+        100;
+        chain_type=SymChain,
+        thinning=2,
+        progress=false,
+    )
+
+    @test chain isa SymChain
+    @test FlexiChains.niters(chain) == 100
+    @test FlexiChains.Extra(:logp) in FlexiChains.extras(chain)
+    @test all(isfinite, chain[:logp])
 end
 
 @testset "ParallelMALASampler sample() with custom param_names" begin
@@ -238,13 +264,13 @@ end
         model,
         sampler,
         40;
-        chain_type=MCMCChains.Chains,
+        chain_type=SymChain,
         progress=false,
         param_names=[:mu, :sigma],
     )
 
-    @test :mu in names(chain, :parameters)
-    @test :sigma in names(chain, :parameters)
+    @test :mu in FlexiChains.parameters(chain)
+    @test :sigma in FlexiChains.parameters(chain)
 end
 
 @testset "ParallelMALASampler stationary distribution" begin
@@ -257,12 +283,12 @@ end
         model,
         sampler,
         5_000;
-        chain_type=MCMCChains.Chains,
+        chain_type=SymChain,
         progress=false,
     )
 
     burn = 500
-    post = Array(chain[burn:end, :, :])  # (N-burn) × D
+    post = Array(chain)[burn:end, :, :]  # (N-burn) × D
 
     mu = vec(mean(post; dims=1))
     vars = vec(var(post; dims=1))
@@ -282,11 +308,11 @@ end
         ParallelMCMC.AbstractMCMC.MCMCThreads(),
         40,
         2;
-        chain_type=MCMCChains.Chains,
+        chain_type=SymChain,
         progress=false,
     )
 
-    @test chains isa MCMCChains.Chains
-    @test size(chains, 1) == 40   # samples per chain
-    @test size(chains, 3) == 2    # number of chains
+    @test chains isa SymChain
+    @test FlexiChains.niters(chains) == 40
+    @test FlexiChains.nchains(chains) == 2
 end

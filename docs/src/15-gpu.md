@@ -115,7 +115,7 @@ y_gpu = CUDA.CuVector(y_cpu)
 ### Mooncake backend (plain operators)
 
 ```julia
-using ParallelMCMC, MCMCChains
+using ParallelMCMC, FlexiChains
 using ADTypes, Mooncake
 
 softplus(z) = log1p(exp(-abs(z))) + max(z, zero(z))
@@ -147,7 +147,7 @@ sampler = ParallelMALASampler(0.005f0;
 
 chain = sample(model, sampler, 1_600;
                initial_params=CUDA.zeros(Float32, D),
-               chain_type=MCMCChains.Chains)
+               chain_type=VNChain)
 ```
 
 Posterior mean recovery error `‖β_post − β_true‖ / ‖β_true‖` should land in the 0.1–0.2 range after a few hundred post-warmup samples.
@@ -157,7 +157,7 @@ Posterior mean recovery error `‖β_post − β_true‖ / ‖β_true‖` should
 Same model, with the GPU-Enzyme restrictions applied: every `*` becomes `pmcmc_matmul`, every `dot` becomes `pmcmc_dot`, and every gradient broadcast is expanded into single-op stages:
 
 ```julia
-using ParallelMCMC, MCMCChains
+using ParallelMCMC, FlexiChains
 using ADTypes, Enzyme
 
 function logp(β)
@@ -218,7 +218,7 @@ sampler = ParallelMALASampler(0.005f0;
 
 chain = sample(model, sampler, 1_600;
                initial_params=CUDA.zeros(Float32, D),
-               chain_type=MCMCChains.Chains)
+               chain_type=VNChain)
 ```
 
 The two snippets sample the same posterior; the difference is purely in what the AD backend can chew on.

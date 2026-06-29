@@ -2,7 +2,7 @@ module ParallelMCMC
 
 using AbstractMCMC
 using CUDA
-using MCMCChains
+using FlexiChains
 using LinearAlgebra
 using Random
 using Statistics
@@ -34,5 +34,9 @@ export AdaptiveMALASampler, AdaptiveMALATransition, AdaptiveMALAState
 export ParallelMALASampler, ParallelMALATransition, ParallelMALAState
 export MALA, DEER
 export pmcmc_matmul, pmcmc_dot, pmcmc_dotsum
+
+# Re-exports for convenience
+import AbstractMCMC: sample
+export sample
 
 end

@@ -4,7 +4,7 @@ using ParallelMCMC
 using ADTypes: ADTypes
 using DynamicPPL: DynamicPPL
 using AbstractMCMC: AbstractMCMC
-using MCMCChains: MCMCChains
+using FlexiChains: FlexiChain, VarName, VNChain, SymChain
 using LogDensityProblems: LogDensityProblems
 
 """
@@ -14,13 +14,12 @@ Convenience constructor: wraps a DynamicPPL/Turing `@model` directly as a
 `DensityModel`, automatically extracting parameter names and wiring up gradient
 computation via DynamicPPL's `adtype` interface.
 
-Requires `DynamicPPL`, `ForwardDiff`, and `LogDensityProblems` to be loaded (these are the
-weak-dependency triggers for this extension; `ForwardDiff` is what backs the default
-`AutoForwardDiff()` AD path).
+Requires `DynamicPPL` and `LogDensityProblems` to be loaded (these are the weak-dependency
+triggers for this extension), plus any AD backend that is used.
 
 # Example
 ```julia
-using Turing, ParallelMCMC, MCMCChains
+using Turing, ParallelMCMC, FlexiChains
 
 @model function mymodel(y)
     μ ~ Normal(0, 1)
@@ -31,7 +30,7 @@ end
 # and `using` the corresponding package (Enzyme, Mooncake).
 model = DensityModel(mymodel(1.5))
 chain = sample(model, AdaptiveMALASampler(0.3; n_warmup=500), 2_000;
-               chain_type=MCMCChains.Chains, discard_warmup=true, progress=true)
+               chain_type=FlexiChains.VNChain, discard_warmup=true, progress=true)
 ```
 """
 function ParallelMCMC.DensityModel(
@@ -106,32 +105,39 @@ for (Ttrans, Tspl, Tstate) in (
             model::DensityModelLDF,
             spl::$Tspl,
             state::$Tstate,
-            chain_type::Type{MCMCChains.Chains};
+            chain_type::Type{VNChain};
             discard_warmup::Bool=false,
             kwargs...,
         )
             ts = discard_warmup ? filter(t -> !is_warmup(t), ts) : ts
-            return make_processed_dynamicppl_chain(MCMCChains.Chains, ts, model)
+            pwss = map(ts) do t
+                # Note: This assumes that there is always a field called t.x. This is currently true
+                # of all samplers in ParallelMCMC
+                DynamicPPL.ParamsWithStats(t.x, model.logdensity.ld, getstats(t))
+            end
+            return AbstractMCMC.from_samples(VNChain, hcat(pwss))
+        end
+    end
+
+    @eval begin
+        function AbstractMCMC.bundle_samples(
+            ts::Vector{<:$Ttrans},
+            model::DensityModelLDF,
+            spl::$Tspl,
+            state::$Tstate,
+            chain_type::Type{SymChain};
+            kwargs...,
+        )
+            throw(ArgumentError("FlexiChains.SymChain is not supported for DynamicPPL models; please use VNChain instead."))
         end
     end
 end
 
-function make_processed_dynamicppl_chain(
-    ::Type{Tchain}, ts::Vector{<:ParallelMCMCTransitionTypes}, model::DensityModelLDF
-) where {Tchain}
-    pwss = map(ts) do t
-        # Note: This assumes that there is always a field called t.x. This is currently true
-        # of all samplers in ParallelMCMC
-        DynamicPPL.ParamsWithStats(t.x, model.logdensity.ld, getstats(t))
-    end
-    return AbstractMCMC.from_samples(Tchain, hcat(pwss))
-end
-
-function ParallelMCMC._construct_chain(
-    ::Type{MCMCChains.Chains},
+function ParallelMCMC._construct_flexichain(
+    ::Type{VarName},
     vals::AbstractMatrix{<:Real},
     internals::AbstractMatrix{<:Real},
-    ::Vector{Symbol},
+    ::Any,
     internal_names::Vector{Symbol},
     model::DensityModelLDF,
 )
@@ -139,7 +145,7 @@ function ParallelMCMC._construct_chain(
         stats = NamedTuple{Tuple(internal_names)}(internal)
         DynamicPPL.ParamsWithStats(val, model.logdensity.ld, stats)
     end
-    return AbstractMCMC.from_samples(MCMCChains.Chains, hcat(pwss))
+    return AbstractMCMC.from_samples(VNChain, hcat(pwss))
 end
 
 end # module
